@@ -1,0 +1,78 @@
+"""
+core/pdf_renderer.py
+--------------------
+Responsabilidade única: abrir um PDF e fornecer:
+  - render_page(n)  → imagem PIL da página n (para exibir)
+  - text_for_page(n) → texto limpo da página n (para TTS)
+  - total_pages     → int
+
+Usa PyMuPDF (fitz). Para trocar a biblioteca de renderização, edite só este arquivo.
+"""
+
+import re
+import unicodedata
+import fitz          # PyMuPDF
+from PIL import Image
+import io
+
+from config import PDF_RENDER_DPI
+
+
+class PDFRenderer:
+    def __init__(self, filepath: str):
+        self._doc   = fitz.open(filepath)
+        self.total  = len(self._doc)
+        self._cache: dict[int, Image.Image] = {}   # cache de páginas já renderizadas
+
+        # Detecta cabeçalhos/rodapés repetidos (≥30% das páginas) para remover do TTS
+        hdr: dict[str, int] = {}
+        ftr: dict[str, int] = {}
+        for page in self._doc:
+            lines = [l.strip() for l in page.get_text().split("\n") if l.strip()]
+            if lines:
+                hdr[lines[0]]  = hdr.get(lines[0], 0) + 1
+            if len(lines) > 1:
+                ftr[lines[-1]] = ftr.get(lines[-1], 0) + 1
+
+        thr = max(3, int(self.total * 0.30))
+        self._skip = {k for k, v in {**hdr, **ftr}.items() if v >= thr}
+
+    def render_page(self, n: int) -> Image.Image:
+        """Renderiza a página n (0-indexed) e retorna uma imagem PIL."""
+        if n in self._cache:
+            return self._cache[n]
+        mat  = fitz.Matrix(PDF_RENDER_DPI / 72, PDF_RENDER_DPI / 72)
+        pix  = self._doc[n].get_pixmap(matrix=mat, alpha=False)
+        img  = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        # Limita cache a 10 páginas para não consumir muita RAM
+        if len(self._cache) >= 10:
+            oldest = next(iter(self._cache))
+            del self._cache[oldest]
+        self._cache[n] = img
+        return img
+
+    def text_for_page(self, n: int) -> str:
+        """Retorna o texto limpo da página n (0-indexed) para o TTS."""
+        raw   = unicodedata.normalize("NFKC", self._doc[n].get_text())
+        lines = [l for l in raw.split("\n") if l.strip() not in self._skip]
+        text  = "\n".join(lines)
+        # Corrige hifenização de fim de linha
+        text  = re.sub(r"(\w+)-\n(\w+)", r"\1\2", text)
+        # Remove números de página isolados
+        text  = re.sub(r"^\s*\d{1,4}\s*$", "", text, flags=re.MULTILINE)
+        # Normaliza espaços
+        text  = re.sub(r"[ \t]+", " ", text)
+        text  = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def search_text(self, n: int, text: str) -> list[dict]:
+        """Busca texto na página n (0-indexed) e retorna coordenadas em pontos do PDF."""
+        if not text.strip() or n < 0 or n >= self.total:
+            return []
+        page = self._doc[n]
+        matches = page.search_for(text.strip())
+        return [{"x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1} for r in matches]
+
+    def close(self):
+        self._doc.close()
+        self._cache.clear()

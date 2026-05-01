@@ -1,0 +1,19 @@
+# Ambientes virtuais
+venv/
+env/
+.env
+
+# Cache do Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Arquivos temporários de áudio
+.tmp_audio/
+*.mp3
+*.vtt
+
+# Dados do usuário
+history.json
+library.json
+highlights.json
