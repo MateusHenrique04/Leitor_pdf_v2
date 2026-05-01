@@ -283,10 +283,11 @@ class App(ctk.CTk):
             return f
 
         _tbtn(btns, "⏮", self._prev_page).pack(side="left", padx=5)
+        _tbtn(btns, "◂", self._prev_chunk, size=13, w=36, h=36).pack(side="left", padx=3)
 
         # Play button
         self._play_frame = tk.Frame(btns, bg=C["red"], width=64, height=64, cursor="hand2")
-        self._play_frame.pack(side="left", padx=12)
+        self._play_frame.pack(side="left", padx=10)
         self._play_frame.pack_propagate(False)
         self._play_lbl = tk.Label(self._play_frame, text="▶",
                                    font=("Georgia", 22), bg=C["red"], fg="#fff")
@@ -296,6 +297,7 @@ class App(ctk.CTk):
             w.bind("<Enter>",    lambda _: self._play_frame.configure(bg=C["red_hot"]))
             w.bind("<Leave>",    lambda _: self._play_frame.configure(bg=C["red"]))
 
+        _tbtn(btns, "▸", self._next_chunk, size=13, w=36, h=36).pack(side="left", padx=3)
         _tbtn(btns, "⏭", self._next_page).pack(side="left", padx=5)
 
     # ── Painel direito ─────────────────────────────────────────────────
@@ -490,9 +492,13 @@ class App(ctk.CTk):
     # ──────────────────────────────────────────────────────────────────
 
     def _bind_keys(self):
-        self.bind("<space>", lambda _: self._toggle_play())
-        self.bind("<Right>", lambda _: self._next_page())
-        self.bind("<Left>",  lambda _: self._prev_page())
+        self.bind("<space>",         lambda _: self._toggle_play())
+        # Setas: pula frases
+        self.bind("<Right>",         lambda _: self._next_chunk())
+        self.bind("<Left>",          lambda _: self._prev_chunk())
+        # Ctrl + setas: pula páginas
+        self.bind("<Control-Right>", lambda _: self._next_page())
+        self.bind("<Control-Left>",  lambda _: self._prev_page())
 
     # ──────────────────────────────────────────────────────────────────
     # BIBLIOTECA
@@ -861,6 +867,41 @@ class App(ctk.CTk):
         if self.current_page > 0:
             self.current_page -= 1
             self.current_chunk_idx = 0
+            self._restart_loop()
+
+    def _get_current_chunks(self) -> list[str]:
+        """Retorna a lista de frases (chunks) da página atual."""
+        if not self.renderer:
+            return []
+        text = self.renderer.text_for_page(self.current_page)
+        if not text:
+            return []
+        return [c.strip() for c in re.split(r'(?<=[.!?])\s+|\n', text) if c.strip()]
+
+    def _next_chunk(self):
+        """Pula para a próxima frase. Se for a última, avança para a próxima página."""
+        if not self.renderer:
+            return
+        chunks = self._get_current_chunks()
+        if chunks and self.current_chunk_idx < len(chunks) - 1:
+            self.current_chunk_idx += 1
+            self._restart_loop()
+        else:
+            # Última frase da página — avança a página
+            self._next_page()
+
+    def _prev_chunk(self):
+        """Volta para a frase anterior. Se for a primeira, volta à página anterior na última frase."""
+        if not self.renderer:
+            return
+        if self.current_chunk_idx > 0:
+            self.current_chunk_idx -= 1
+            self._restart_loop()
+        elif self.current_page > 0:
+            # Primeira frase da página — volta à página anterior, na última frase
+            self.current_page -= 1
+            chunks = self._get_current_chunks()
+            self.current_chunk_idx = max(0, len(chunks) - 1)
             self._restart_loop()
 
     def _on_seek(self, _event):
