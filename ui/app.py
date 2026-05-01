@@ -772,13 +772,11 @@ class App(ctk.CTk):
         iy = cy - img_y0
         if not (0 <= ix < nw and 0 <= iy < nh):
             return None
-        # Coordenada em pontos do PDF (72 dpi base)
-        zoom_pdf = PDF_RENDER_DPI / 72.0
-        pdf_x = (ix / scale) * zoom_pdf / zoom_pdf   # simplifica para ix / scale
-        pdf_y = (iy / scale)
-        # Ajuste: ix/scale dá pixels da imagem original; convertar para pontos PDF
-        pdf_x = ix / scale
-        pdf_y = iy / scale
+        # ix/scale → pixel na imagem PIL original (renderizada a PDF_RENDER_DPI)
+        # ÷ (PDF_RENDER_DPI/72) → converte pixel para ponto PDF (72 DPI)
+        dpi_scale = PDF_RENDER_DPI / 72.0
+        pdf_x = (ix / scale) / dpi_scale
+        pdf_y = (iy / scale) / dpi_scale
         return pdf_x, pdf_y
 
     def _on_word_click(self, cx: int, cy: int):

@@ -1,100 +1,177 @@
 """
 core/dictionary.py
 ------------------
-Busca definições de palavras usando a Free Dictionary API.
-Suporte: pt-BR (principal), en (secundário), es (terciário).
+Busca definições de palavras.
+  - Português : Wiktionary PT  (cobertura excelente)
+  - Inglês    : Free Dictionary API  (api.dictionaryapi.dev)
+  - Espanhol  : Free Dictionary API  (api.dictionaryapi.dev)
 """
 
 import urllib.request
 import urllib.parse
 import json
 import re
+import html
 
-# Prioridade de idiomas
-LANG_PRIORITY = ["pt-BR", "en", "es"]
-API_BASE = "https://api.dictionaryapi.dev/api/v2/entries/{lang}/{word}"
 
+# ──────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────
 
 def _clean_word(word: str) -> str:
-    """Remove pontuação e normaliza a palavra para busca."""
+    """Remove pontuação e normaliza para busca."""
     return re.sub(r"[^\w\-']", "", word).strip().lower()
 
 
-def _fetch(lang: str, word: str) -> dict | None:
-    """Faz requisição à API. Retorna dict com dados ou None se não encontrado."""
-    url = API_BASE.format(lang=lang, word=urllib.parse.quote(word))
+def _strip_html(text: str) -> str:
+    """Remove tags HTML e decodifica entidades."""
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text).strip()
+
+
+def _get(url: str) -> bytes | None:
+    """Faz GET simples com timeout. Retorna bytes ou None."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Lector/1.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            if resp.status == 200:
-                data = json.loads(resp.read().decode())
-                if isinstance(data, list) and data:
-                    return data[0]
+        with urllib.request.urlopen(req, timeout=5) as r:
+            if r.status == 200:
+                return r.read()
     except Exception:
         pass
     return None
 
 
+# ──────────────────────────────────────────────────────────────────
+# Backends
+# ──────────────────────────────────────────────────────────────────
+
+def _lookup_wiktionary_pt(word: str) -> dict | None:
+    """
+    Busca no Wiktionary PT via REST API.
+    Endpoint: https://pt.wiktionary.org/api/rest_v1/page/definition/{word}
+    """
+    url = f"https://pt.wiktionary.org/api/rest_v1/page/definition/{urllib.parse.quote(word)}"
+    raw = _get(url)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+
+    # A API retorna dict de idiomas; chave "pt" para Português
+    lang_data = data.get("pt") or data.get("en") or next(iter(data.values()), [])
+    if not lang_data:
+        return None
+
+    meanings = []
+    for entry in lang_data:
+        pos = entry.get("partOfSpeech", "")
+        defs = []
+        for d in entry.get("definitions", [])[:3]:
+            definition = _strip_html(d.get("definition", ""))
+            if definition:
+                defs.append(definition)
+        if defs:
+            meanings.append({"part_of_speech": pos, "definitions": defs})
+
+    if not meanings:
+        return None
+
+    return {
+        "word":     word,
+        "phonetic": None,
+        "lang":     "pt-BR",
+        "meanings": meanings,
+    }
+
+
+def _lookup_free_dict(word: str, lang: str) -> dict | None:
+    """
+    Busca na Free Dictionary API.
+    Boa para EN e ES.
+    """
+    url = f"https://api.dictionaryapi.dev/api/v2/entries/{lang}/{urllib.parse.quote(word)}"
+    raw = _get(url)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(data, list) or not data:
+        return None
+
+    entry = data[0]
+    phonetic = entry.get("phonetic") or ""
+    if not phonetic:
+        for p in entry.get("phonetics", []):
+            if p.get("text"):
+                phonetic = p["text"]
+                break
+
+    meanings = []
+    for m in entry.get("meanings", []):
+        pos  = m.get("partOfSpeech", "")
+        defs = [d["definition"] for d in m.get("definitions", [])[:3] if d.get("definition")]
+        if defs:
+            meanings.append({"part_of_speech": pos, "definitions": defs})
+
+    if not meanings:
+        return None
+
+    return {
+        "word":     entry.get("word", word),
+        "phonetic": phonetic or None,
+        "lang":     lang,
+        "meanings": meanings,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────
+# API pública
+# ──────────────────────────────────────────────────────────────────
+
 def lookup(word: str, detected_lang: str | None = None) -> dict | None:
     """
     Busca a definição de uma palavra.
-    Tenta o idioma detectado primeiro, depois percorre LANG_PRIORITY.
+    Ordem de tentativa: PT (Wiktionary) → EN → ES.
+    Se detected_lang for passado, esse idioma vai primeiro.
 
     Retorna dict com:
         word        : str
         phonetic    : str | None
-        lang        : str  (idioma encontrado)
+        lang        : str
         meanings    : list[{part_of_speech, definitions: list[str]}]
-    Retorna None se nenhum idioma retornar resultado.
     """
     clean = _clean_word(word)
-    if not clean:
+    if not clean or len(clean) < 2:
         return None
 
-    order = []
-    if detected_lang and detected_lang not in LANG_PRIORITY:
-        order.append(detected_lang)
-    if detected_lang and detected_lang in LANG_PRIORITY:
-        order = [detected_lang] + [l for l in LANG_PRIORITY if l != detected_lang]
-    else:
-        order = LANG_PRIORITY[:]
+    # Sempre tenta PT primeiro (idioma principal do app)
+    result = _lookup_wiktionary_pt(clean)
+    if result:
+        return result
 
-    for lang in order:
-        data = _fetch(lang, clean)
-        if not data:
-            continue
+    # Fallback: EN
+    result = _lookup_free_dict(clean, "en")
+    if result:
+        return result
 
-        phonetic = data.get("phonetic") or ""
-        if not phonetic:
-            for p in data.get("phonetics", []):
-                if p.get("text"):
-                    phonetic = p["text"]
-                    break
-
-        meanings = []
-        for m in data.get("meanings", []):
-            pos   = m.get("partOfSpeech", "")
-            defs  = [d["definition"] for d in m.get("definitions", [])[:3] if d.get("definition")]
-            if defs:
-                meanings.append({"part_of_speech": pos, "definitions": defs})
-
-        if meanings:
-            return {
-                "word":     data.get("word", clean),
-                "phonetic": phonetic or None,
-                "lang":     lang,
-                "meanings": meanings,
-            }
+    # Fallback: ES
+    result = _lookup_free_dict(clean, "es")
+    if result:
+        return result
 
     return None
 
 
 def detect_lang(text: str) -> str | None:
-    """Tenta detectar o idioma do texto. Retorna código compatível com a API ou None."""
+    """Detecta idioma do texto. Retorna 'pt-BR', 'en', 'es' ou None."""
     try:
         from langdetect import detect
         code = detect(text)
-        mapping = {"pt": "pt-BR", "en": "en", "es": "es"}
-        return mapping.get(code)
+        return {"pt": "pt-BR", "en": "en", "es": "es"}.get(code)
     except Exception:
         return None
+
