@@ -73,6 +73,23 @@ class PDFRenderer:
         matches = page.search_for(text.strip())
         return [{"x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1} for r in matches]
 
+    def word_at(self, n: int, pdf_x: float, pdf_y: float) -> str | None:
+        """
+        Retorna a palavra que contém o ponto (pdf_x, pdf_y) na página n (0-indexed).
+        Usa get_text('words') do PyMuPDF — cada item é (x0, y0, x1, y1, word, ...).
+        Retorna None se nenhuma palavra for encontrada nessa posição.
+        """
+        if n < 0 or n >= self.total:
+            return None
+        page = self._doc[n]
+        for w in page.get_text("words"):
+            x0, y0, x1, y1, word = w[0], w[1], w[2], w[3], w[4]
+            if x0 <= pdf_x <= x1 and y0 <= pdf_y <= y1:
+                import re
+                return re.sub(r"[^\w\-']", "", word).strip() or None
+        return None
+
     def close(self):
         self._doc.close()
         self._cache.clear()
+

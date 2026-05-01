@@ -3,3 +3,4 @@ pymupdf
 pillow
 edge-tts
 pygame
+langdetect
