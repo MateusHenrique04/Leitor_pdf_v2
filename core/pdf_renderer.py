@@ -66,12 +66,42 @@ class PDFRenderer:
         return text.strip()
 
     def search_text(self, n: int, text: str) -> list[dict]:
-        """Busca texto na página n (0-indexed) e retorna coordenadas em pontos do PDF."""
+        """
+        Busca texto na página n (0-indexed) e retorna coordenadas em pontos do PDF.
+
+        Estratégia em duas etapas para evitar que palavras curtas (artigos,
+        preposições) grifem todas as ocorrências no texto:
+          1. Tenta encontrar a frase/linha completa — é o mais preciso.
+          2. Se não achar (PDF com colunas, hifenização), busca palavras
+             individuais com comprimento > 3 chars usando word boundary,
+             ignorando palavras com ≤ 2 chars completamente.
+        """
         if not text.strip() or n < 0 or n >= self.total:
             return []
         page = self._doc[n]
+
+        # Etapa 1: frase completa
         matches = page.search_for(text.strip())
-        return [{"x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1} for r in matches]
+        if matches:
+            return [{"x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1} for r in matches]
+
+        # Etapa 2: palavras significativas com word boundary (> 3 chars)
+        words_in_page = page.get_text("words")   # (x0,y0,x1,y1,word,block,line,word_n)
+        significant   = [w for w in text.split() if len(w) > 3]
+        if not significant:
+            return []
+
+        results = []
+        for target in significant:
+            pattern = re.compile(
+                r"(?<![A-Za-zÀ-ÿ0-9])" + re.escape(target) + r"(?![A-Za-zÀ-ÿ0-9])",
+                re.IGNORECASE,
+            )
+            for (x0, y0, x1, y1, word, *_) in words_in_page:
+                clean = re.sub(r"[^\w\-'À-ÿ]", "", word)
+                if pattern.fullmatch(clean):
+                    results.append({"x0": x0, "y0": y0, "x1": x1, "y1": y1})
+        return results
 
     def word_at(self, n: int, pdf_x: float, pdf_y: float) -> str | None:
         """
@@ -92,4 +122,3 @@ class PDFRenderer:
     def close(self):
         self._doc.close()
         self._cache.clear()
-

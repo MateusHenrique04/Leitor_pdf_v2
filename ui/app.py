@@ -73,6 +73,8 @@ class App(ctk.CTk):
         self._ephemeral_highlights = []
         self._current_text = ""
         self._detected_lang: str | None = None   # idioma detectado na página atual
+        self._autoscroll_enabled: bool = True    # scroll automático ligado/desligado
+        self._alive = True                        # False após _quit — impede callbacks órfãos
 
         # Rastreia clique vs. pan no canvas
         self._press_x = 0
@@ -305,6 +307,18 @@ class App(ctk.CTk):
 
         _tbtn(btns, "▸", self._next_chunk, size=13, w=36, h=36).pack(side="left", padx=3)
         _tbtn(btns, "⏭", self._next_page).pack(side="left", padx=5)
+
+        # Botão de auto-scroll
+        self._scroll_btn = tk.Label(
+            t, text="⇕ auto-scroll  ON",
+            font=("Courier", 8, "bold"),
+            bg=C["border"], fg=C["success"],
+            cursor="hand2", padx=10, pady=3,
+        )
+        self._scroll_btn.pack(pady=(8, 0))
+        self._scroll_btn.bind("<Button-1>", lambda _: self._toggle_autoscroll())
+        self._scroll_btn.bind("<Enter>",    lambda _: self._scroll_btn.configure(bg="#333"))
+        self._scroll_btn.bind("<Leave>",    lambda _: self._scroll_btn.configure(bg=C["border"]))
 
     # ── Painel direito ─────────────────────────────────────────────────
 
@@ -602,6 +616,7 @@ class App(ctk.CTk):
 
         self.current_page = n
         self._pan_x = self._pan_y = 0   # reseta pan ao mudar de página
+        self._ephemeral_highlights = []  # limpa grifo da frase anterior
         lib.save_position(self.current_path, n, self.current_chunk_idx)
 
         # Atualiza label e slider sem disparar seek
@@ -615,7 +630,8 @@ class App(ctk.CTk):
         """Roda em background — renderiza a imagem e agenda o draw na UI."""
         try:
             img = self.renderer.render_page(n)
-            self.after(0, lambda i=img: self._draw_image(i))
+            if self._alive:
+                self.after(0, lambda i=img: self._draw_image(i))
         except Exception as e:
             log.error(f"Erro ao renderizar página {n}: {e}")
 
@@ -625,6 +641,8 @@ class App(ctk.CTk):
 
     def _draw_image(self, img: Image.Image):
         """Exibe a imagem PIL no canvas com os grifos, respeitando zoom e pan."""
+        if not self._alive:
+            return
         cw = self._canvas.winfo_width()
         ch = self._canvas.winfo_height()
         if cw < 10 or ch < 10:
@@ -800,7 +818,8 @@ class App(ctk.CTk):
     def _fetch_and_show(self, word: str, cx: int, cy: int):
         """Roda em background: busca definição e agenda popup na UI."""
         result = dic.lookup(word, self._detected_lang)
-        self.after(0, lambda: self._show_dict_popup(word, result, cx, cy))
+        if self._alive:
+            self.after(0, lambda: self._show_dict_popup(word, result, cx, cy))
 
     def _show_dict_popup(self, word: str, result: dict | None, cx: int, cy: int):
         """Exibe popup estilizado com a definição da palavra."""
@@ -902,8 +921,14 @@ class App(ctk.CTk):
             sy = sy - ph - 30
         popup.geometry(f"+{sx}+{sy}")
 
-        # Fecha ao clicar fora do popup
-        popup.bind("<FocusOut>", lambda _: popup.destroy() if popup.winfo_exists() else None)
+        # Fecha ao clicar fora do popup — usa bind no próprio toplevel com guard
+        def _on_focus_out(e):
+            try:
+                if popup.winfo_exists():
+                    popup.destroy()
+            except Exception:
+                pass
+        popup.bind("<FocusOut>", _on_focus_out)
         popup.focus_set()
 
     def _on_canvas_resize(self, _event):
@@ -959,7 +984,8 @@ class App(ctk.CTk):
 
             async def get_audio(text_chunk):
                 try:
-                    return await speak(text_chunk, self._voice, self._speed)
+                    audio, _timings = await speak(text_chunk, self._voice, self._speed)
+                    return audio
                 except Exception as e:
                     log.error(f"TTS erro: {e}")
                     return b""
@@ -1001,9 +1027,12 @@ class App(ctk.CTk):
         """Para o loop atual e reinicia da página corrente."""
         self._stop.set()
         self.player.stop()
-        self.after(250, self._do_restart)
+        if self._alive:
+            self.after(250, self._do_restart)
 
     def _do_restart(self):
+        if not self._alive:
+            return
         self._stop.clear()
         threading.Thread(
             target=lambda: asyncio.run(self._read_loop()),
@@ -1112,20 +1141,78 @@ class App(ctk.CTk):
         """Atualiza o grifo de leitura atual (apenas em memória RAM/UI) e redesenha."""
         if not self.renderer or not self._current_text:
             return
-        
-        # Busca pequenas porções para ter mais chance de achar a linha
-        lines = [l for l in self._current_text.split('\n') if len(l) > 5]
-        if not lines:
-            lines = [self._current_text]
-            
+
         self._ephemeral_highlights = []
-        for line in lines:
-            matches = self.renderer.search_text(self.current_page, line)
-            for m in matches:
-                m["color"] = "#00E5FF" # Cor fixa para TTS
-                self._ephemeral_highlights.append(m)
-                
-        self.after(0, self._redraw)
+
+        # Tenta o chunk completo primeiro (mais preciso, evita falsos positivos)
+        try:
+            matches = self.renderer.search_text(self.current_page, self._current_text)
+        except Exception:
+            matches = []
+
+        # Fallback: tenta linha por linha só se o chunk inteiro não foi encontrado
+        if not matches:
+            lines = [l for l in self._current_text.split("\n") if len(l) > 5]
+            for line in lines:
+                try:
+                    matches += self.renderer.search_text(self.current_page, line)
+                except Exception:
+                    continue
+
+        for m in matches:
+            m["color"] = "#00E5FF"
+            self._ephemeral_highlights.append(m)
+
+        if self._alive:
+            self.after(0, self._redraw)
+            self.after(0, self._auto_scroll_to_highlight)
+
+    def _toggle_autoscroll(self):
+        """Liga/desliga o scroll automático."""
+        self._autoscroll_enabled = not self._autoscroll_enabled
+        if self._autoscroll_enabled:
+            self._scroll_btn.configure(text="⇕ auto-scroll  ON",  fg=C["success"])
+        else:
+            self._scroll_btn.configure(text="⇕ auto-scroll  OFF", fg=C["text_dim"])
+
+    def _auto_scroll_to_highlight(self):
+        """
+        Ajusta _pan_y para centralizar verticalmente o grifo efêmero atual.
+        Funciona com o sistema existente de pan/zoom — não usa yview.
+        """
+        if not self._alive or not self._autoscroll_enabled \
+                or not self._ephemeral_highlights or not self._cur_img:
+            return
+        try:
+            ys = [h["y0"] for h in self._ephemeral_highlights] + \
+                 [h["y1"] for h in self._ephemeral_highlights]
+            y_center_pdf = (min(ys) + max(ys)) / 2.0
+
+            # Converte coordenadas PDF (pontos) → pixels na imagem renderizada
+            zoom_pdf = PDF_RENDER_DPI / 72.0
+            y_center_img = y_center_pdf * zoom_pdf
+
+            cw = self._canvas.winfo_width()
+            ch = self._canvas.winfo_height()
+            if cw < 10 or ch < 10:
+                return
+            iw, ih = self._cur_img.size
+            base_scale = min(cw / iw, ch / ih)
+            scale = base_scale * self._zoom
+
+            # Posição Y do centro do grifo no canvas SEM nenhum pan aplicado
+            y_on_canvas_no_pan = (ch - ih * scale) / 2 + y_center_img * scale
+
+            # Pan necessário para trazer esse ponto ao centro vertical do canvas
+            desired_pan_y = ch / 2 - y_on_canvas_no_pan
+
+            # Aplica suavização e limita ao range de pan permitido
+            max_py = max(0, (int(ih * scale) - ch) // 2 + int(ih * scale) // 4)
+            new_pan_y = int(self._pan_y * 0.3 + desired_pan_y * 0.7)
+            self._pan_y = max(-max_py, min(max_py, new_pan_y))
+            self._redraw()
+        except Exception as e:
+            log.debug(f"auto_scroll erro (ignorado): {e}")
 
     def _highlight_manual(self):
         """Salva a posição do texto lido atualmente como grifo permanente."""
@@ -1190,9 +1277,10 @@ class App(ctk.CTk):
     # ──────────────────────────────────────────────────────────────────
 
     def _quit(self):
+        self._alive = False
+        self._stop.set()
         self._save_session()
         highlights.save_to_disk()
-        self._stop.set()
         self.player.quit()
         if self.renderer:
             self.renderer.close()
