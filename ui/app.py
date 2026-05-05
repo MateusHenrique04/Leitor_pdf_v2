@@ -50,9 +50,17 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("LECTOR")
-        self.geometry("1300x820")
         self.minsize(900, 600)
         self.configure(fg_color=C["bg"])
+        from config import BASE
+        self._geo_file = BASE / ".window_geometry"
+        if self._geo_file.exists():
+            try:
+                self.geometry(self._geo_file.read_text().strip())
+            except Exception:
+                self.geometry("1300x820")
+        else:
+            self.geometry("1300x820")
 
         # Estado
         self.renderer:  PDFRenderer | None = None
@@ -72,7 +80,8 @@ class App(ctk.CTk):
         
         self._ephemeral_highlights = []
         self._current_text = ""
-        self._detected_lang: str | None = None   # idioma detectado na página atual
+        self._detected_lang: str | None = None
+        self._state_lock = threading.Lock()   # protege current_chunk_idx entre threads
         self._autoscroll_enabled: bool = True    # scroll automático ligado/desligado
         self._alive = True                        # False após _quit — impede callbacks órfãos
 
@@ -239,12 +248,54 @@ class App(ctk.CTk):
         self._prog_slider.bind("<Button-1>",        lambda _: setattr(self, "_dragging", True))
         self._prog_slider.bind("<ButtonRelease-1>", self._on_seek)
 
+        # Barra de busca (oculta por padrão, Ctrl+F para abrir)
+        self._search_bar = tk.Frame(viewer, bg=C["panel"])
+        self._search_bar.grid(row=1, column=0, sticky="ew")
+        self._search_bar.grid_remove()   # oculta
+        viewer.grid_rowconfigure(1, weight=0)
+        viewer.grid_rowconfigure(2, weight=1)
+
+        tk.Label(self._search_bar, text="🔍", font=("Courier", 10),
+                 bg=C["panel"], fg=C["text_dim"], padx=8).pack(side="left")
+        self._search_var = tk.StringVar()
+        self._search_entry = tk.Entry(
+            self._search_bar, textvariable=self._search_var,
+            font=("Georgia", 11), bg="#1C1C1C", fg=C["text"],
+            insertbackground=C["text"], relief="flat", bd=4,
+        )
+        self._search_entry.pack(side="left", fill="x", expand=True, pady=6)
+        self._search_count_lbl = tk.Label(
+            self._search_bar, text="", font=("Courier", 9),
+            bg=C["panel"], fg=C["text_dim"], padx=8,
+        )
+        self._search_count_lbl.pack(side="left")
+        for txt, cmd in [("▲", lambda: self._search_navigate(-1)),
+                         ("▼", lambda: self._search_navigate(+1))]:
+            b = tk.Label(self._search_bar, text=txt, font=("Courier", 11, "bold"),
+                         bg=C["border"], fg=C["text"], cursor="hand2", padx=8, pady=4)
+            b.pack(side="left", padx=2, pady=4)
+            b.bind("<Button-1>", lambda e, c=cmd: c())
+            b.bind("<Enter>", lambda e, bb=b: bb.configure(bg="#333"))
+            b.bind("<Leave>", lambda e, bb=b: bb.configure(bg=C["border"]))
+        close_s = tk.Label(self._search_bar, text="✕", font=("Courier", 11, "bold"),
+                           bg=C["panel"], fg=C["text_dim"], cursor="hand2", padx=10)
+        close_s.pack(side="right")
+        close_s.bind("<Button-1>", lambda _: self._close_search())
+        self._search_var.trace_add("write", lambda *_: self._do_search())
+        self._search_entry.bind("<Return>",   lambda _: self._search_navigate(+1))
+        self._search_entry.bind("<Shift-Return>", lambda _: self._search_navigate(-1))
+        self._search_entry.bind("<Escape>",   lambda _: self._close_search())
+
+        # Resultados de busca
+        self._search_results: list[dict] = []   # lista de {page, bbox}
+        self._search_result_idx = -1
+
         # Canvas para exibir a imagem da página
         self._canvas = tk.Canvas(
             viewer, bg="#1A1A1A",
             highlightthickness=0, bd=0,
         )
-        self._canvas.grid(row=1, column=0, sticky="nsew")
+        self._canvas.grid(row=2, column=0, sticky="nsew")
         self._canvas.bind("<Configure>",     self._on_canvas_resize)
         self._canvas.bind("<MouseWheel>",     self._on_mousewheel)      # Windows
         self._canvas.bind("<Button-4>",       self._on_mousewheel)      # Linux scroll up
@@ -491,6 +542,18 @@ class App(ctk.CTk):
         )
         btn_clear.pack(pady=(4, 0), padx=16, fill="x")
 
+        btn_export = ctk.CTkButton(
+            panel,
+            text        = "📤 Exportar Grifos",
+            command     = self._export_highlights,
+            fg_color    = C["panel"],
+            hover_color = C["border"],
+            text_color  = C["text_dim"],
+            border_width=1,
+            border_color=C["border"],
+        )
+        btn_export.pack(pady=(4, 0), padx=16, fill="x")
+
         # STATUS
         _sep()
         _lbl("STATUS")
@@ -507,6 +570,20 @@ class App(ctk.CTk):
         )
         self._btn_mark_finished.pack(pady=(4, 0), padx=16, fill="x")
 
+        _sep()
+        _lbl("SUMÁRIO")
+        btn_toc = ctk.CTkButton(
+            panel,
+            text="📋 Ver Sumário",
+            command=self._show_toc,
+            fg_color=C["panel"],
+            hover_color=C["border"],
+            text_color=C["text_dim"],
+            border_width=1,
+            border_color=C["border"]
+        )
+        btn_toc.pack(pady=(4, 0), padx=16, fill="x")
+
     # ──────────────────────────────────────────────────────────────────
     # ATALHOS
     # ──────────────────────────────────────────────────────────────────
@@ -519,6 +596,9 @@ class App(ctk.CTk):
         # Ctrl + setas: pula páginas
         self.bind("<Control-Right>", lambda _: self._next_page())
         self.bind("<Control-Left>",  lambda _: self._prev_page())
+        # Busca
+        self.bind("<Control-f>",     lambda _: self._open_search())
+        self.bind("<Control-F>",     lambda _: self._open_search())
 
     # ──────────────────────────────────────────────────────────────────
     # BIBLIOTECA
@@ -538,26 +618,42 @@ class App(ctk.CTk):
                      font=("Courier", 8), bg=C["panel"],
                      fg=C["text_dim"]).pack(pady=10, padx=18, anchor="w")
             return
-        for path in books:
+        for path, meta in books.items():
             name = os.path.basename(path)
-            disp = name[:25] + "…" if len(name) > 26 else name
-            row  = tk.Frame(self._lib_frame, bg=C["panel"], cursor="hand2")
+            disp = name[:22] + "…" if len(name) > 23 else name
+            outer = tk.Frame(self._lib_frame, bg=C["panel"])
+            outer.pack(fill="x")
+            row  = tk.Frame(outer, bg=C["panel"], cursor="hand2")
             row.pack(fill="x")
             dot = tk.Label(row, text="▸", font=("Courier", 9),
                            bg=C["panel"], fg=C["red"], padx=10)
             dot.pack(side="left")
             lbl = tk.Label(row, text=disp, font=("Georgia", 10),
                            bg=C["panel"], fg="#909090",
-                           anchor="w", pady=7)
+                           anchor="w", pady=6)
             lbl.pack(side="left", fill="x", expand=True)
 
-            def _open(p=path): self._load_book(p)
-            def _on(e, r=row, d=dot, l=lbl):
-                r.configure(bg="#1C1C1C"); d.configure(bg="#1C1C1C"); l.configure(bg="#1C1C1C")
-            def _off(e, r=row, d=dot, l=lbl):
-                r.configure(bg=C["panel"]); d.configure(bg=C["panel"]); l.configure(bg=C["panel"])
+            # Barra de progresso
+            total = meta.get("total_pages", 0)
+            last  = meta.get("last_page", 0)
+            pct   = (last / total) if total > 0 else 0.0
+            pct_txt = f"{int(pct*100)}%"
+            prog_bg = tk.Frame(outer, bg=C["border"], height=2)
+            prog_bg.pack(fill="x", padx=0)
+            prog_fill = tk.Frame(prog_bg, bg=C["red"], height=2)
+            prog_fill.place(relwidth=pct, relheight=1.0)
+            pct_lbl = tk.Label(outer, text=pct_txt,
+                               font=("Courier", 7), bg=C["panel"],
+                               fg=C["text_dim"], anchor="e", padx=10)
+            pct_lbl.pack(fill="x")
 
-            for w in (row, dot, lbl):
+            def _open(p=path): self._load_book(p)
+            def _on(e, r=row, d=dot, l=lbl, o=outer, pl=pct_lbl):
+                for w in (r, d, l, o, pl): w.configure(bg="#1C1C1C")
+            def _off(e, r=row, d=dot, l=lbl, o=outer, pl=pct_lbl):
+                for w in (r, d, l, o, pl): w.configure(bg=C["panel"])
+
+            for w in (outer, row, dot, lbl, pct_lbl):
                 w.bind("<Button-1>", lambda e, fn=_open: fn())
                 w.bind("<Enter>", _on); w.bind("<Leave>", _off)
 
@@ -632,6 +728,8 @@ class App(ctk.CTk):
             img = self.renderer.render_page(n)
             if self._alive:
                 self.after(0, lambda i=img: self._draw_image(i))
+            # Pré-renderiza páginas adjacentes em background
+            self.renderer.prefetch(n)
         except Exception as e:
             log.error(f"Erro ao renderizar página {n}: {e}")
 
@@ -658,11 +756,16 @@ class App(ctk.CTk):
         draw = ImageDraw.Draw(overlay)
         zoom_pdf = PDF_RENDER_DPI / 72.0
 
-        # Desenha efêmeros (TTS)
+        # Desenha efêmeros (TTS) — respeita opacity individual
         if self._ephemeral_highlights:
             for h in self._ephemeral_highlights:
-                r, g, b = self._hex_to_rgb(h.get("color", "#00E5FF")) # Cor diferente para a leitura
-                draw.rectangle([h["x0"]*zoom_pdf, h["y0"]*zoom_pdf, h["x1"]*zoom_pdf, h["y1"]*zoom_pdf], fill=(r, g, b, 90))
+                r, g, b = self._hex_to_rgb(h.get("color", "#00E5FF"))
+                a = int(h.get("opacity", 0.35) * 255)
+                draw.rectangle(
+                    [h["x0"]*zoom_pdf, h["y0"]*zoom_pdf,
+                     h["x1"]*zoom_pdf, h["y1"]*zoom_pdf],
+                    fill=(r, g, b, a),
+                )
 
         # Desenha manuais
         if self.current_path:
@@ -995,16 +1098,18 @@ class App(ctk.CTk):
             for i in range(start_idx, len(chunks)):
                 if self._stop.is_set():
                     break
-                    
-                self.current_chunk_idx = i
+
+                with self._state_lock:
+                    self.current_chunk_idx = i
                 self._current_text = chunks[i]
                 self._highlight_ephemeral()
-                
+
                 audio = await next_audio_task
-                
+
+                # Pré-gera o próximo chunk enquanto o atual toca
                 if i + 1 < len(chunks):
-                    next_audio_task = asyncio.create_task(get_audio(chunks[i+1]))
-                
+                    next_audio_task = asyncio.create_task(get_audio(chunks[i + 1]))
+
                 if self._stop.is_set() or not audio:
                     break
 
@@ -1167,6 +1272,206 @@ class App(ctk.CTk):
             self.after(0, self._redraw)
             self.after(0, self._auto_scroll_to_highlight)
 
+
+
+    def _show_toc(self):
+        """Abre janela com sumário extraído do PDF via PyMuPDF."""
+        if not self.renderer:
+            messagebox.showinfo("Sumário", "Nenhum livro aberto.")
+            return
+        toc = self.renderer.get_toc()
+        if not toc:
+            messagebox.showinfo("Sumário",
+                                "Este PDF não possui sumário embutido. "
+                                "Tente um PDF com marcadores/bookmarks.")
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Sumário")
+        win.configure(bg=C["bg"])
+        win.geometry("420x560")
+        win.resizable(True, True)
+
+        tk.Frame(win, bg=C["red"], height=3).pack(fill="x")
+        tk.Label(win, text="SUMÁRIO", font=("Georgia", 13, "bold"),
+                 bg=C["bg"], fg=C["text"], pady=12).pack()
+        tk.Frame(win, bg=C["border"], height=1).pack(fill="x", padx=16)
+
+        frame = tk.Frame(win, bg=C["bg"])
+        frame.pack(fill="both", expand=True, padx=0, pady=8)
+
+        scrollbar = tk.Scrollbar(frame, bg=C["border"],
+                                  troughcolor=C["panel"], bd=0, width=8)
+        scrollbar.pack(side="right", fill="y")
+
+        canvas = tk.Canvas(frame, bg=C["bg"], highlightthickness=0,
+                           yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=canvas.yview)
+
+        inner = tk.Frame(canvas, bg=C["bg"])
+        canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_configure(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfig(canvas_window, width=canvas.winfo_width())
+        inner.bind("<Configure>", _on_configure)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(
+            canvas_window, width=e.width))
+
+        for level, title, page in toc:
+            indent = (level - 1) * 16
+            row = tk.Frame(inner, bg=C["bg"], cursor="hand2")
+            row.pack(fill="x", pady=1)
+
+            # Indicador de nível
+            color = C["red"] if level == 1 else C["text_dim"]
+            prefix = "▸ " if level == 1 else "  · "
+            lbl = tk.Label(row,
+                           text=prefix + title,
+                           font=("Georgia", 10 if level == 1 else 9,
+                                 "bold" if level == 1 else "normal"),
+                           bg=C["bg"], fg=color,
+                           anchor="w", padx=12 + indent, pady=5,
+                           wraplength=320, justify="left")
+            lbl.pack(side="left", fill="x", expand=True)
+
+            page_lbl = tk.Label(row, text=str(page),
+                                font=("Courier", 8), bg=C["bg"],
+                                fg=C["text_dim"], padx=10)
+            page_lbl.pack(side="right")
+
+            def _go(p=page):
+                self.current_page = p - 1
+                self.current_chunk_idx = 0
+                self._restart_loop()
+                win.destroy()
+
+            def _hover_on(e, r=row, l=lbl, pl=page_lbl):
+                for w in (r, l, pl): w.configure(bg="#1C1C1C")
+            def _hover_off(e, r=row, l=lbl, pl=page_lbl):
+                for w in (r, l, pl): w.configure(bg=C["bg"])
+
+            for w in (row, lbl, page_lbl):
+                w.bind("<Button-1>", lambda e, fn=_go: fn())
+                w.bind("<Enter>", _hover_on)
+                w.bind("<Leave>", _hover_off)
+
+        win.bind("<MouseWheel>", lambda e: canvas.yview_scroll(
+            -1 if e.delta > 0 else 1, "units"))
+
+    # ──────────────────────────────────────────────────────────────────
+    # BUSCA NO PDF (Ctrl+F)
+    # ──────────────────────────────────────────────────────────────────
+
+    def _open_search(self):
+        self._search_bar.grid()
+        self._search_entry.focus_set()
+        self._search_entry.select_range(0, "end")
+
+    def _close_search(self):
+        self._search_bar.grid_remove()
+        self._search_results = []
+        self._search_result_idx = -1
+        self._ephemeral_highlights = [h for h in self._ephemeral_highlights
+                                       if h.get("_search")]
+        self._ephemeral_highlights = []
+        self._redraw()
+
+    def _do_search(self):
+        """Busca o termo em todas as páginas do PDF e armazena resultados."""
+        term = self._search_var.get().strip()
+        self._search_results = []
+        self._search_result_idx = -1
+        self._search_count_lbl.configure(text="")
+        if not term or not self.renderer:
+            self._redraw()
+            return
+        # Busca somente na página atual para resposta imediata
+        hits = self.renderer.search_text(self.current_page, term)
+        for bbox in hits:
+            bbox["_search"] = True
+            bbox["color"]   = "#FFD600"
+            self._search_results.append({"page": self.current_page, "bbox": bbox})
+        # Busca no restante das páginas em background
+        threading.Thread(target=self._search_all_pages,
+                         args=(term, self.current_page), daemon=True).start()
+
+    def _search_all_pages(self, term: str, skip_page: int):
+        """Varre todas as páginas exceto skip_page (já feita em _do_search)."""
+        if not self.renderer:
+            return
+        results = []
+        for p in range(self.total_pages):
+            if p == skip_page:
+                continue
+            try:
+                hits = self.renderer.search_text(p, term)
+            except Exception:
+                hits = []
+            for bbox in hits:
+                bbox["_search"] = True
+                bbox["color"]   = "#FFD600"
+                results.append({"page": p, "bbox": bbox})
+        # Ordena por página e mescla com os resultados da página atual
+        if self._alive and self._search_var.get().strip() == term:
+            def _merge():
+                self._search_results += results
+                self._search_results.sort(key=lambda r: r["page"])
+                total = len(self._search_results)
+                if total == 0:
+                    self._search_count_lbl.configure(text="sem resultados")
+                else:
+                    self._search_count_lbl.configure(text=f"1 / {total}")
+                    self._search_result_idx = 0
+                    self._jump_to_search_result(0)
+            self.after(0, _merge)
+
+    def _search_navigate(self, delta: int):
+        if not self._search_results:
+            return
+        n = len(self._search_results)
+        self._search_result_idx = (self._search_result_idx + delta) % n
+        self._search_count_lbl.configure(
+            text=f"{self._search_result_idx + 1} / {n}")
+        self._jump_to_search_result(self._search_result_idx)
+
+    def _jump_to_search_result(self, idx: int):
+        if not self._search_results or idx < 0:
+            return
+        result = self._search_results[idx]
+        page   = result["page"]
+        bbox   = result["bbox"]
+        # Vai para a página do resultado se necessário
+        if page != self.current_page:
+            self.current_page = page
+            self._prog_var.set(page + 1)
+            self._page_lbl.configure(text=f"PÁG. {page + 1} / {self.total_pages}")
+            threading.Thread(target=self._render_and_draw, args=(page,), daemon=True).start()
+        # Destaca o resultado no canvas
+        self._ephemeral_highlights = [
+            {**r["bbox"], "color": "#FFD600", "_search": True}
+            for r in self._search_results if r["page"] == page
+        ]
+        # Resultado atual em laranja
+        self._ephemeral_highlights[
+            [r["page"] for r in self._search_results if r["page"] == page].index(page)
+            if page in [r["page"] for r in self._search_results] else 0
+        ]["color"] = "#FF6D00"
+        self._ephemeral_highlights[0]["color"] = "#FF6D00"
+        # Centraliza no resultado via pan
+        zoom_pdf = PDF_RENDER_DPI / 72.0
+        y_center_pdf = (bbox["y0"] + bbox["y1"]) / 2.0
+        if self._cur_img:
+            cw = self._canvas.winfo_width()
+            ch = self._canvas.winfo_height()
+            iw, ih = self._cur_img.size
+            base_scale = min(cw / iw, ch / ih)
+            scale = base_scale * self._zoom
+            y_on_canvas = (ch - ih * scale) / 2 + y_center_pdf * zoom_pdf * scale
+            self._pan_y = int(ch / 2 - y_on_canvas)
+        self._redraw()
+
     def _toggle_autoscroll(self):
         """Liga/desliga o scroll automático."""
         self._autoscroll_enabled = not self._autoscroll_enabled
@@ -1237,6 +1542,62 @@ class App(ctk.CTk):
         highlights.clear_page(self.current_path, self.current_page + 1)
         self._redraw()
 
+    def _export_highlights(self):
+        """Exporta todos os grifos do livro atual para um arquivo Markdown."""
+        if not self.current_path or not self.renderer:
+            messagebox.showinfo("Exportar Grifos", "Nenhum livro aberto.")
+            return
+
+        all_h = highlights._load().get(self.current_path, {})
+        if not all_h:
+            messagebox.showinfo("Exportar Grifos",
+                                "Nenhum grifo salvo neste livro.")
+            return
+
+        import os
+        from tkinter import filedialog
+
+        book_name = os.path.splitext(os.path.basename(self.current_path))[0]
+        default_name = f"grifos_{book_name}.md"
+        dest = filedialog.asksaveasfilename(
+            title="Salvar grifos como…",
+            initialfile=default_name,
+            defaultextension=".md",
+            filetypes=[("Markdown", "*.md"), ("Texto", "*.txt"), ("Todos", "*.*")],
+        )
+        if not dest:
+            return
+
+        lines = [f"# Grifos — {book_name}", ""]
+
+        for page_str, page_highlights in sorted(all_h.items(),
+                                                 key=lambda x: int(x[0])):
+            page_num = int(page_str)
+            lines.append(f"## Página {page_num}")
+            lines.append("")
+            for h in page_highlights:
+                # Extrai o texto do trecho grifado via PDFRenderer
+                try:
+                    page_obj = self.renderer._doc[page_num - 1]
+                    rect = __import__("fitz").Rect(h["x0"], h["y0"],
+                                                   h["x1"], h["y1"])
+                    text = page_obj.get_text("text", clip=rect).strip()
+                    text = " ".join(text.split())  # normaliza espaços/quebras
+                except Exception:
+                    text = "(texto não extraível)"
+                color = h.get("color", "#FFDD00")
+                lines.append(f"> {text}")
+                lines.append(f"<!-- cor: {color} -->")
+                lines.append("")
+
+        content_md = "\n".join(lines)
+        try:
+            open(dest, "w", encoding="utf-8").write(content_md)
+            messagebox.showinfo("Exportar Grifos",
+                                f"Grifos exportados com sucesso!\n{dest}")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Não foi possível salvar:\n{e}")
+
     def _toggle_finished(self):
         if not self.current_path:
             return
@@ -1259,7 +1620,9 @@ class App(ctk.CTk):
 
     def _save_session(self):
         if self.current_path:
-            lib.save_position(self.current_path, self.current_page, self.current_chunk_idx)
+            with self._state_lock:
+                _chunk = self.current_chunk_idx
+            lib.save_position(self.current_path, self.current_page, _chunk)
         
         if self._session_secs < 1 or not self.current_path:
             return
@@ -1288,6 +1651,10 @@ class App(ctk.CTk):
         try:
             if TEMP_DIR.exists():
                 shutil.rmtree(TEMP_DIR)
+        except Exception:
+            pass
+        try:
+            self._geo_file.write_text(self.geometry())
         except Exception:
             pass
         self.destroy()

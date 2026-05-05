@@ -4,3 +4,4 @@ pillow
 edge-tts
 pygame
 langdetect
+beautifulsoup4
