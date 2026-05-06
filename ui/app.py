@@ -647,15 +647,60 @@ class App(ctk.CTk):
                                fg=C["text_dim"], anchor="e", padx=10)
             pct_lbl.pack(fill="x")
 
+            # Botão remover (×) — fica discreto, vermelho no hover
+            btn_rm = tk.Label(row, text="×", font=("Georgia", 13, "bold"),
+                              bg=C["panel"], fg=C["text_dim"],
+                              padx=8, pady=4, cursor="hand2")
+            btn_rm.pack(side="right")
+
             def _open(p=path): self._load_book(p)
-            def _on(e, r=row, d=dot, l=lbl, o=outer, pl=pct_lbl):
-                for w in (r, d, l, o, pl): w.configure(bg="#1C1C1C")
-            def _off(e, r=row, d=dot, l=lbl, o=outer, pl=pct_lbl):
-                for w in (r, d, l, o, pl): w.configure(bg=C["panel"])
+            def _remove(p=path): self._remove_book(p)
+
+            def _on(e, r=row, d=dot, l=lbl, o=outer, pl=pct_lbl, b=btn_rm):
+                for w in (r, d, l, o, pl, b): w.configure(bg="#1C1C1C")
+                b.configure(fg=C["red"])
+            def _off(e, r=row, d=dot, l=lbl, o=outer, pl=pct_lbl, b=btn_rm):
+                for w in (r, d, l, o, pl, b): w.configure(bg=C["panel"])
+                b.configure(fg=C["text_dim"])
 
             for w in (outer, row, dot, lbl, pct_lbl):
                 w.bind("<Button-1>", lambda e, fn=_open: fn())
                 w.bind("<Enter>", _on); w.bind("<Leave>", _off)
+
+            btn_rm.bind("<Button-1>", lambda e, fn=_remove: fn())
+            btn_rm.bind("<Enter>", _on); btn_rm.bind("<Leave>", _off)
+
+    # ──────────────────────────────────────────────────────────────────
+    # REMOVER LIVRO
+    # ──────────────────────────────────────────────────────────────────
+
+    def _remove_book(self, path: str):
+        """Remove o livro da biblioteca após confirmação."""
+        name = os.path.basename(path)
+        ok = messagebox.askyesno(
+            "Remover livro",
+            f'Remover "{name}" da biblioteca?\n\nO arquivo PDF não será apagado.',
+            icon="warning",
+        )
+        if not ok:
+            return
+
+        # Se o livro removido estiver aberto, limpa a tela
+        if self.current_path == path:
+            self._stop.set()
+            self.player.stop()
+            if self.renderer:
+                self.renderer.close()
+                self.renderer = None
+            self.current_path = None
+            self._title_lbl.configure(text="Nenhum livro aberto")
+            self._page_lbl.configure(text="")
+            self._canvas.delete("all")
+            self._canvas_img_ref = None
+
+        lib.remove(path)
+        highlights.clear_book(path)
+        self._refresh_lib()
 
     # ──────────────────────────────────────────────────────────────────
     # CARREGAR LIVRO
@@ -713,6 +758,7 @@ class App(ctk.CTk):
         self.current_page = n
         self._pan_x = self._pan_y = 0   # reseta pan ao mudar de página
         self._ephemeral_highlights = []  # limpa grifo da frase anterior
+        self._eph_y_cursor = 0.0         # reseta cursor de posição sequencial
         lib.save_position(self.current_path, n, self.current_chunk_idx)
 
         # Atualiza label e slider sem disparar seek
@@ -1243,29 +1289,89 @@ class App(ctk.CTk):
     # ──────────────────────────────────────────────────────────────────
 
     def _highlight_ephemeral(self):
-        """Atualiza o grifo de leitura atual (apenas em memória RAM/UI) e redesenha."""
+        """
+        Atualiza o grifo de leitura atual (apenas em memória RAM/UI) e redesenha.
+
+        search_text() já retorna TODOS os retângulos que compõem uma frase
+        (uma frase multi-linha vira vários retângulos, todos do mesmo grupo).
+        Por isso o filtro de cursor deve agir no GRUPO inteiro, não em
+        retângulos individuais — caso contrário só o primeiro retângulo
+        seria exibido e a frase apareceria grifada pela metade.
+
+        Agrupamento:
+          - O resultado de search_text é um único grupo de retângulos contíguos.
+          - No fallback linha-por-linha, cada chamada devolve um grupo; juntamos
+            todos e os tratamos como um grupo só (mesma frase, linhas separadas).
+
+        Filtro de cursor:
+          - Usamos o y0 MÍNIMO do grupo para comparar com o cursor.
+          - Aceitamos o grupo se seu y0_min >= cursor - 15pt (tolerância de 1 linha).
+          - Se nenhum grupo passar (virada de página), aceita o mais próximo.
+        """
         if not self.renderer or not self._current_text:
             return
 
         self._ephemeral_highlights = []
+        cursor = getattr(self, "_eph_y_cursor", 0.0)
 
-        # Tenta o chunk completo primeiro (mais preciso, evita falsos positivos)
+        # ── Tenta o chunk completo ────────────────────────────────────
         try:
-            matches = self.renderer.search_text(self.current_page, self._current_text)
+            group = self.renderer.search_text(self.current_page, self._current_text)
         except Exception:
-            matches = []
+            group = []
 
-        # Fallback: tenta linha por linha só se o chunk inteiro não foi encontrado
-        if not matches:
-            lines = [l for l in self._current_text.split("\n") if len(l) > 5]
+        # ── Fallback: linha por linha ─────────────────────────────────
+        if not group:
+            lines = [l for l in self._current_text.split("\n") if len(l.strip()) > 5]
             for line in lines:
                 try:
-                    matches += self.renderer.search_text(self.current_page, line)
+                    partial = self.renderer.search_text(self.current_page, line)
+                    group.extend(partial)
                 except Exception:
                     continue
 
-        for m in matches:
-            m["color"] = "#00E5FF"
+        if not group:
+            if self._alive:
+                self.after(0, self._redraw)
+            return
+
+        # ── search_text retorna retângulos de UMA ocorrência da frase ─
+        # Quando há ambiguidade (palavra repetida na página), search_text
+        # pode devolver retângulos de posições distintas.  Agrupamos por
+        # proximidade vertical: retângulos com y0 contíguo (gap < 30pt)
+        # pertencem ao mesmo grupo; escolhemos o grupo cujo y0_min está
+        # mais próximo e à frente do cursor.
+
+        # Ordena todos os retângulos por y0
+        group_sorted = sorted(group, key=lambda m: m["y0"])
+
+        # Divide em sub-grupos contíguos (gap > 30pt = novo grupo)
+        sub_groups: list[list[dict]] = []
+        current_sg: list[dict] = []
+        for rect in group_sorted:
+            if not current_sg or rect["y0"] - current_sg[-1]["y1"] <= 30:
+                current_sg.append(rect)
+            else:
+                sub_groups.append(current_sg)
+                current_sg = [rect]
+        if current_sg:
+            sub_groups.append(current_sg)
+
+        # Escolhe o sub-grupo mais próximo e à frente do cursor
+        candidates = [sg for sg in sub_groups if min(r["y0"] for r in sg) >= cursor - 15]
+        if candidates:
+            best_group = min(candidates, key=lambda sg: min(r["y0"] for r in sg))
+        else:
+            # Virada de página ou cursor desatualizado — pega o mais próximo
+            best_group = min(sub_groups,
+                             key=lambda sg: abs(min(r["y0"] for r in sg) - cursor))
+
+        # Atualiza cursor para o y1 do último retângulo do grupo escolhido
+        self._eph_y_cursor = max(r["y1"] for r in best_group)
+
+        for m in best_group:
+            m["color"]   = "#00E5FF"
+            m["opacity"] = 0.35
             self._ephemeral_highlights.append(m)
 
         if self._alive:
@@ -1489,9 +1595,10 @@ class App(ctk.CTk):
                 or not self._ephemeral_highlights or not self._cur_img:
             return
         try:
-            ys = [h["y0"] for h in self._ephemeral_highlights] + \
-                 [h["y1"] for h in self._ephemeral_highlights]
-            y_center_pdf = (min(ys) + max(ys)) / 2.0
+            # Centraliza no topo do grifo atual — evita pular para o meio
+            # de múltiplos bboxes espalhados (causava autoscroll errático)
+            first = min(self._ephemeral_highlights, key=lambda h: h["y0"])
+            y_center_pdf = (first["y0"] + first["y1"]) / 2.0
 
             # Converte coordenadas PDF (pontos) → pixels na imagem renderizada
             zoom_pdf = PDF_RENDER_DPI / 72.0

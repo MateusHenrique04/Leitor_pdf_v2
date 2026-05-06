@@ -44,6 +44,9 @@ try:
 except ImportError:
     _HAS_BS4 = False
 
+# Cache de definições já buscadas (evita requests repetidos)
+_dict_cache: dict = {}
+
 
 # ──────────────────────────────────────────────────────────────────
 # Helpers

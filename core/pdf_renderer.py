@@ -70,42 +70,63 @@ class PDFRenderer:
         """
         Busca o trecho `text` na página n e retorna bboxes em pontos PDF.
 
-        Estratégia em 3 etapas, da mais precisa para a mais tolerante:
+        Estratégia em 4 etapas, da mais precisa para a mais tolerante:
 
-        1. search_for() com o texto completo — funciona quando o PDF não
-           tem quebras de linha no meio da frase.
+        1. search_for() com o texto completo — retorna múltiplos retângulos
+           quando a frase atravessa linhas (quads=True).
 
-        2. Âncora pelas primeiras N palavras únicas da frase (N = 4..2).
-           Acha o bloco de texto onde a frase começa e retorna o bbox de
-           todas as linhas desse bloco que contenham palavras do chunk.
-           Evita falsos positivos porque exige uma sequência, não palavras
-           soltas.
+        2. Âncora pelas primeiras N palavras em sequência (N = 5..2).
+           Encontra onde a frase começa e coleta TODAS as linhas até cobrir
+           o número de palavras do chunk (sem limite arbitrário de n_lines).
 
-        3. Só como último recurso, e apenas para frases com ≥ 8 palavras
-           significativas: retorna o bbox da linha inteira de cada palavra
-           significativa encontrada (em vez de apenas a bbox da palavra).
-           Isso produz um grifo de linha inteira em vez de palavras esparsas.
+        3. Âncora pelo FINAL da frase (últimas 3 palavras) — captura casos
+           onde o início é genérico mas o fim é único.
+
+        4. Último recurso: palavras únicas na página → retorna linhas inteiras.
+           Só ativa para chunks com ≥ 6 palavras significativas.
         """
         if not text.strip() or n < 0 or n >= self.total:
             return []
         page = self._doc[n]
 
-        # ── Etapa 1: frase completa ──────────────────────────────────
+        # ── Etapa 1: frase completa via search_for ───────────────────
+        # Tenta com quads=True para obter múltiplos retângulos em frases multi-linha
+        try:
+            quads = page.search_for(text.strip(), quads=True)
+            if quads:
+                rects = []
+                for q in quads:
+                    r = q.rect
+                    rects.append({"x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1})
+                return rects
+        except Exception:
+            pass
+
+        # Fallback search_for sem quads
         matches = page.search_for(text.strip())
         if matches:
             return [{"x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1} for r in matches]
 
-        # Coleta palavras da página agrupadas por linha (block, line)
+        # ── Monta estrutura de palavras por linha ────────────────────
         # words_in_page: lista de (x0,y0,x1,y1,word,block_n,line_n,word_n)
         words_in_page = page.get_text("words")
         if not words_in_page:
             return []
 
-        # Agrupa palavras por (block, line) para poder devolver linhas inteiras
+        # Ordena por posição vertical e depois horizontal (garante ordem de leitura)
+        words_in_page = sorted(words_in_page, key=lambda w: (round(w[1], 1), w[0]))
+
+        # Recalcula chaves de linha baseadas em y0 agrupado (mais estável que block/line)
+        # Agrupa palavras cuja y0 difere em menos de 4pt como mesma linha
         line_map: dict[tuple, list] = defaultdict(list)
+        # Primeiro passa: usa (block_n, line_n) como chave canônica
         for w in words_in_page:
-            key = (int(w[5]), int(w[6]))   # (block_n, line_n)
+            key = (int(w[5]), int(w[6]))
             line_map[key].append(w)
+
+        # Ordena as chaves de linha por posição y (topo da linha)
+        sorted_keys = sorted(line_map.keys(),
+                             key=lambda k: min(w[1] for w in line_map[k]))
 
         def _line_bbox(key) -> dict:
             ws = line_map[key]
@@ -117,70 +138,103 @@ class PDFRenderer:
             }
 
         def _normalize(s: str) -> str:
-            return re.sub(r"[^\w À-ÿ]", "", unicodedata.normalize("NFKC", s).lower()).strip()
+            nfkc = unicodedata.normalize("NFKC", s).lower()
+            return re.sub(r"[^\w À-ÿ]", "", nfkc).strip()
 
         chunk_words = _normalize(text).split()
         if not chunk_words:
             return []
 
-        # ── Etapa 2: âncora pelas primeiras N palavras em sequência ──
-        for anchor_len in (4, 3, 2):
+        # Lista plana de palavras da página com suas chaves de linha
+        page_word_list = [(_normalize(w[4]), (int(w[5]), int(w[6]))) for w in words_in_page]
+        page_words_only = [pw for pw, _ in page_word_list]
+
+        def _collect_lines_from_anchor(anchor_idx: int, n_chunk_words: int) -> list[dict]:
+            """
+            A partir da palavra em anchor_idx na página, coleta linhas até
+            ter coberto n_chunk_words palavras.  Retorna lista de bboxes.
+            """
+            # Descobre qual linha contém a palavra âncora
+            anchor_key = page_word_list[anchor_idx][1]
+            try:
+                key_pos = sorted_keys.index(anchor_key)
+            except ValueError:
+                return []
+
+            words_accumulated = 0
+            result_keys = []
+
+            for ki in range(key_pos, len(sorted_keys)):
+                key = sorted_keys[ki]
+                result_keys.append(key)
+                words_accumulated += len(line_map[key])
+                # Para quando acumulamos palavras suficientes
+                # (+2 de margem para linhas que terminam com pontuação)
+                if words_accumulated >= n_chunk_words - 2:
+                    break
+
+            return [_line_bbox(k) for k in result_keys]
+
+        # ── Etapa 2: âncora pelo INÍCIO da frase ────────────────────
+        for anchor_len in (5, 4, 3, 2):
             if len(chunk_words) < anchor_len:
                 continue
             anchor = chunk_words[:anchor_len]
 
-            # Percorre as palavras da página procurando a sequência âncora
-            page_word_list = [(w, (int(w[5]), int(w[6]))) for w in words_in_page]
-            for idx in range(len(page_word_list) - anchor_len + 1):
-                seq = [_normalize(page_word_list[idx + k][0][4]) for k in range(anchor_len)]
-                if seq == anchor:
-                    # Encontrou a âncora — coleta as linhas que cobrem o chunk
-                    # Estima quantas linhas o chunk ocupa pelo nº de palavras
-                    start_key = page_word_list[idx][1]
-                    all_keys  = list(line_map.keys())
+            for idx in range(len(page_words_only) - anchor_len + 1):
+                if page_words_only[idx: idx + anchor_len] == anchor:
+                    result = _collect_lines_from_anchor(idx, len(chunk_words))
+                    if result:
+                        return result
+
+        # ── Etapa 3: âncora pelo FINAL da frase ─────────────────────
+        anchor_len_end = 3
+        if len(chunk_words) >= anchor_len_end:
+            anchor_end = chunk_words[-anchor_len_end:]
+            for idx in range(len(page_words_only) - anchor_len_end + 1):
+                if page_words_only[idx: idx + anchor_len_end] == anchor_end:
+                    # Encontrou o fim — volta para encontrar o início estimado
+                    end_key = page_word_list[idx][1]
                     try:
-                        start_pos = all_keys.index(start_key)
+                        end_pos = sorted_keys.index(end_key)
                     except ValueError:
-                        break
+                        continue
 
-                    # Número estimado de linhas = ceil(palavras_chunk / palavras_por_linha)
-                    words_per_line = max(1, len(line_map[start_key]))
-                    n_lines = max(1, -(-len(chunk_words) // words_per_line))  # ceil division
-                    n_lines = min(n_lines + 1, len(all_keys) - start_pos)     # +1 margem
+                    # Estima quantas linhas para trás precisamos ir
+                    words_per_line = max(1, len(line_map[end_key]))
+                    lines_needed = max(1, -(-len(chunk_words) // words_per_line))
+                    start_pos = max(0, end_pos - lines_needed)
 
-                    result = []
-                    for k in range(n_lines):
-                        key = all_keys[start_pos + k]
-                        result.append(_line_bbox(key))
-                    return result
+                    result = [_line_bbox(k) for k in sorted_keys[start_pos: end_pos + 1]]
+                    if result:
+                        return result
 
-        # ── Etapa 3: fallback — grifo de linha inteira por palavra única ──
+        # ── Etapa 4: fallback — palavras únicas → linhas inteiras ────
         significant = [w for w in chunk_words if len(w) > 4]
-        if len(significant) < 4:   # chunk muito curto: não grifa para evitar spam
+        if len(significant) < 6:
             return []
 
-        # Conta ocorrências de cada palavra na página para descartar ambíguas
-        page_words_norm = [_normalize(w[4]) for w in words_in_page]
-        word_counts = {}
-        for pw in page_words_norm:
+        # Conta ocorrências para usar só palavras inequívocas
+        word_counts: dict[str, int] = {}
+        for pw in page_words_only:
             word_counts[pw] = word_counts.get(pw, 0) + 1
 
-        # Usa apenas palavras que aparecem UMA vez na página (inequívocas)
         unique_sig = [w for w in significant if word_counts.get(w, 0) == 1]
         if not unique_sig:
-            unique_sig = significant[:2]   # aceita as duas primeiras se todas são ambíguas
+            unique_sig = significant[:3]
 
         hit_lines: set[tuple] = set()
         for target in unique_sig:
-            for w, key in page_word_list:
-                if _normalize(w[4]) == target:
+            for pw, key in page_word_list:
+                if pw == target:
                     hit_lines.add(key)
 
         if not hit_lines:
             return []
 
-        # Retorna bbox de linha inteira, não de palavra isolada
-        return [_line_bbox(k) for k in sorted(hit_lines)]
+        # Retorna as linhas em ordem de leitura
+        ordered = [k for k in sorted_keys if k in hit_lines]
+        return [_line_bbox(k) for k in ordered]
 
     def word_at(self, n: int, pdf_x: float, pdf_y: float) -> str | None:
         """
