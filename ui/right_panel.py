@@ -77,7 +77,13 @@ class RightPanelMixin:
                     opt.bind("<Enter>",    lambda e, o=opt: o.configure(bg=C["hover"]))
                     opt.bind("<Leave>",    lambda e, o=opt, i=i:
                              o.configure(bg=C["select_bg"] if i == self._voice_idx else C["panel_alt2"]))
-                self._voice_popup.pack(fill="x", padx=16)
+                # `after=vbtn` é essencial aqui: pack() empilha widgets na
+                # ORDEM EM QUE FORAM EMPACOTADOS, não na ordem em que foram
+                # criados. Como este popup só é empacotado no clique (bem
+                # depois de todo o resto do painel já estar montado), sem
+                # `after=` ele cairia no fim da pilha — aparecendo lá
+                # embaixo do painel em vez de logo abaixo do dropdown.
+                self._voice_popup.pack(fill="x", padx=16, after=vbtn)
                 self._voice_popup_open = True
 
         for w in (vbtn, self._voice_lbl, arr):
