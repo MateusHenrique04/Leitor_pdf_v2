@@ -14,31 +14,41 @@ Regra: lógica de negócio fica em core/ e data/.
        Este arquivo orquestra UI + chama os módulos, usando mixins.
 """
 
-import os
-import threading
 import datetime
+import logging
+import os
 import shutil
 import sys
-import logging
-
-import tkinter as tk
+import threading
 from tkinter import messagebox
+
 import customtkinter as ctk
 
-from config import C, VOICES, SPEEDS, DEFAULT_VOICE, DEFAULT_SPEED, DEFAULT_VOLUME
-from core.player       import Player
-import data.history as hist
 import data.highlights as highlights
+import data.history as hist
+import data.prefs as prefs
+from config import (
+    DEFAULT_HIGHLIGHT_LABEL,
+    DEFAULT_SPEED,
+    DEFAULT_VOICE,
+    DEFAULT_VOLUME,
+    GEOMETRY_FILE,
+    HIGHLIGHT_COLORS,
+    SPEEDS,
+    VOICES,
+    C,
+)
+from core.player import Player
+from ui.controls import ControlsMixin
+from ui.dict_popup import DictPopupMixin
+from ui.focus_dialog import FocusMixin
+from ui.highlights_mixin import HighlightsMixin
+from ui.right_panel import RightPanelMixin
 
 # Import dos mixins
 from ui.sidebar import SidebarMixin
-from ui.viewer import ViewerMixin
-from ui.controls import ControlsMixin
-from ui.right_panel import RightPanelMixin
-from ui.highlights_mixin import HighlightsMixin
-from ui.dict_popup import DictPopupMixin
 from ui.toc_window import TocMixin
-from ui.focus_dialog import FocusMixin
+from ui.viewer import ViewerMixin
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -55,8 +65,7 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
         self.title("LECTOR")
         self.minsize(900, 600)
         self.configure(fg_color=C["bg"])
-        from config import BASE
-        self._geo_file = BASE / ".window_geometry"
+        self._geo_file = GEOMETRY_FILE
         if self._geo_file.exists():
             try:
                 self.geometry(self._geo_file.read_text().strip())
@@ -64,6 +73,33 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
                 self.geometry("1300x820")
         else:
             self.geometry("1300x820")
+
+        # Preferências persistidas (voz, velocidade, volume, zoom,
+        # auto-scroll, cor de grifo) — antes resetavam para os padrões de
+        # config.py a cada abertura do app; agora seguem o usuário entre
+        # sessões (ver data/prefs.py).
+        _p = prefs.get_all()
+
+        self._pref_voice_name = _p.get("voice") or DEFAULT_VOICE
+        if self._pref_voice_name not in VOICES:
+            self._pref_voice_name = DEFAULT_VOICE
+
+        self._pref_speed_label = _p.get("speed") or DEFAULT_SPEED
+        if self._pref_speed_label not in SPEEDS:
+            self._pref_speed_label = DEFAULT_SPEED
+
+        _volume = _p.get("volume")
+        self._pref_volume = DEFAULT_VOLUME if _volume is None else max(0.0, min(1.0, _volume))
+
+        self._pref_highlight_label = _p.get("highlight_color_label") or DEFAULT_HIGHLIGHT_LABEL
+        if self._pref_highlight_label not in HIGHLIGHT_COLORS:
+            self._pref_highlight_label = DEFAULT_HIGHLIGHT_LABEL
+
+        _zoom = _p.get("zoom")
+        self._pref_zoom = 2.5 if _zoom is None else max(1.0, min(5.0, _zoom))
+
+        _autoscroll = _p.get("autoscroll")
+        self._pref_autoscroll = True if _autoscroll is None else bool(_autoscroll)
 
         # Estado
         self.renderer = None
@@ -73,19 +109,19 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
         self.current_chunk_idx = 0      # índice da frase atual sendo lida
         self.total_pages   = 0
         self._stop         = threading.Event()
-        self._voice        = VOICES[DEFAULT_VOICE]
-        self._speed        = SPEEDS[DEFAULT_SPEED]
+        self._voice        = VOICES[self._pref_voice_name]
+        self._speed        = SPEEDS[self._pref_speed_label]
         self._dragging     = False
         self._session_start = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
         self._session_secs  = 0.0
         self._timer_running = False
         self._last_tick     = 0.0
-        
+
         self._ephemeral_highlights = []
         self._current_text = ""
         self._detected_lang: str | None = None
         self._state_lock = threading.Lock()   # protege current_chunk_idx entre threads
-        self._autoscroll_enabled: bool = True    # scroll automático ligado/desligado
+        self._autoscroll_enabled: bool = self._pref_autoscroll   # scroll automático ligado/desligado
         self._alive = True                        # False após _quit — impede callbacks órfãos
 
         # Modo foco
@@ -102,10 +138,10 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
         self._sel_start_pdf = None    # (pdf_x, pdf_y) início da seleção
         self._sel_rect_id   = None    # id do retângulo desenhado no canvas
 
-        self.player.volume = DEFAULT_VOLUME
+        self.player.volume = self._pref_volume
 
         # Zoom e pan da página
-        self._zoom       = 2.5          # 1.0 = ajusta ao canvas, >1.0 = zoom
+        self._zoom       = self._pref_zoom   # 1.0 = ajusta ao canvas, >1.0 = zoom
         self._zoom_min   = 1.0
         self._zoom_max   = 5.0
         self._pan_x      = 0            # offset de pan em pixels (imagem renderizada)
@@ -151,6 +187,33 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
         self.bind("<Control-F>",     lambda _: self._open_search())
         # Modo foco
         self.bind("<Control-Shift-F>", lambda _: self._open_focus_dialog())
+        # Abrir arquivo
+        self.bind("<Control-o>",     lambda _: self._open_file())
+        self.bind("<Control-O>",     lambda _: self._open_file())
+        # Zoom (+ / - / reset) — antes só existiam botões na topbar
+        self.bind("<plus>",          lambda _: self._zoom_in())
+        self.bind("<equal>",         lambda _: self._zoom_in())   # "+" sem Shift em teclado US
+        self.bind("<KP_Add>",        lambda _: self._zoom_in())
+        self.bind("<minus>",         lambda _: self._zoom_out())
+        self.bind("<KP_Subtract>",   lambda _: self._zoom_out())
+        self.bind("<Control-0>",     lambda _: self._zoom_reset())
+        # Esc universal — fecha o que estiver aberto (popup de dicionário,
+        # barra de busca); cada Toplevel modal (foco, sumário, popup) tem
+        # seu próprio bind de Esc além deste.
+        self.bind("<Escape>",        lambda _: self._on_escape())
+
+    def _on_escape(self):
+        """Fecha, em ordem de prioridade, o que estiver aberto na janela
+        principal quando o usuário aperta Esc."""
+        if getattr(self, "_dict_popup", None) is not None:
+            try:
+                if self._dict_popup.winfo_exists():
+                    self._dict_popup.destroy()
+                    return
+            except Exception:
+                pass
+        if hasattr(self, "_search_bar") and self._search_bar.winfo_ismapped():
+            self._close_search()
 
     # ──────────────────────────────────────────────────────────────────
     # CRONÔMETRO

@@ -1,13 +1,16 @@
 import asyncio
-import threading
 import logging
 import re
+import threading
+import time
 import tkinter as tk
 
-from config import C, PDF_RENDER_DPI
-from core.tts import speak
-from core import dictionary as dic
 import data.library as lib
+import data.prefs as prefs
+from config import FONTS, PDF_RENDER_DPI, C
+from core import dictionary as dic
+from core.tts import speak
+from ui.widgets import flat_button
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +28,7 @@ class ControlsMixin:
 
         self._timer_lbl = tk.Label(
             t, text="00:00:00",
-            font=("Courier", 16, "bold"),
+            font=FONTS["timer"],
             bg=C["panel"], fg=C["red"],
         )
         self._timer_lbl.pack(pady=(0, 8))
@@ -33,47 +36,65 @@ class ControlsMixin:
         btns = tk.Frame(t, bg=C["panel"])
         btns.pack()
 
-        def _tbtn(parent, text, cmd, size=15, w=42, h=42):
-            f = tk.Frame(parent, bg=C["border"], width=w, height=h, cursor="hand2")
-            f.pack_propagate(False)
-            lbl = tk.Label(f, text=text, font=("Georgia", size),
-                           bg=C["border"], fg="#888")
-            lbl.place(relx=0.5, rely=0.5, anchor="center")
-            for ww in (f, lbl):
-                ww.bind("<Button-1>", lambda _, c=cmd: c())
-                ww.bind("<Enter>",    lambda _, ff=f, ll=lbl: [ff.configure(bg="#2E2E2E"), ll.configure(bg="#2E2E2E")])
-                ww.bind("<Leave>",    lambda _, ff=f, ll=lbl: [ff.configure(bg=C["border"]), ll.configure(bg=C["border"])])
-            return f
-
-        _tbtn(btns, "⏮", self._prev_page).pack(side="left", padx=5)
-        _tbtn(btns, "◂", self._prev_chunk, size=13, w=36, h=36).pack(side="left", padx=3)
+        flat_button(btns, "⏮", self._prev_page,
+                    font=FONTS["icon"], bg=C["border"], fg="#888",
+                    hover_bg=C["hover"], width=42, height=42).pack(side="left", padx=5)
+        flat_button(btns, "◂", self._prev_chunk,
+                    font=FONTS["icon_sm"], bg=C["border"], fg="#888",
+                    hover_bg=C["hover"], width=36, height=36).pack(side="left", padx=3)
 
         # Play button
-        self._play_frame = tk.Frame(btns, bg=C["red"], width=64, height=64, cursor="hand2")
+        self._play_frame = flat_button(
+            btns, "▶", self._toggle_play,
+            font=("Georgia", 22), bg=C["red"], fg="#fff",
+            hover_bg=C["red_hot"], width=64, height=64,
+        )
         self._play_frame.pack(side="left", padx=10)
-        self._play_frame.pack_propagate(False)
-        self._play_lbl = tk.Label(self._play_frame, text="▶",
-                                   font=("Georgia", 22), bg=C["red"], fg="#fff")
-        self._play_lbl.place(relx=0.5, rely=0.5, anchor="center")
-        for w in (self._play_frame, self._play_lbl):
-            w.bind("<Button-1>", lambda _: self._toggle_play())
-            w.bind("<Enter>",    lambda _: self._play_frame.configure(bg=C["red_hot"]))
-            w.bind("<Leave>",    lambda _: self._play_frame.configure(bg=C["red"]))
+        self._play_lbl = self._play_frame.label   # alias — trocado dinamicamente em _toggle_play
 
-        _tbtn(btns, "▸", self._next_chunk, size=13, w=36, h=36).pack(side="left", padx=3)
-        _tbtn(btns, "⏭", self._next_page).pack(side="left", padx=5)
+        flat_button(btns, "▸", self._next_chunk,
+                    font=FONTS["icon_sm"], bg=C["border"], fg="#888",
+                    hover_bg=C["hover"], width=36, height=36).pack(side="left", padx=3)
+        flat_button(btns, "⏭", self._next_page,
+                    font=FONTS["icon"], bg=C["border"], fg="#888",
+                    hover_bg=C["hover"], width=42, height=42).pack(side="left", padx=5)
 
-        # Botão de auto-scroll
+        # Botão de auto-scroll (preferência persistida — ver data/prefs.py)
+        autoscroll_on = self._autoscroll_enabled
         self._scroll_btn = tk.Label(
-            t, text="⇕ auto-scroll  ON",
-            font=("Courier", 8, "bold"),
-            bg=C["border"], fg=C["success"],
+            t, text=f"⇕ auto-scroll  {'ON' if autoscroll_on else 'OFF'}",
+            font=FONTS["label"],
+            bg=C["border"], fg=C["success"] if autoscroll_on else C["text_dim"],
             cursor="hand2", padx=10, pady=3,
         )
         self._scroll_btn.pack(pady=(8, 0))
         self._scroll_btn.bind("<Button-1>", lambda _: self._toggle_autoscroll())
         self._scroll_btn.bind("<Enter>",    lambda _: self._scroll_btn.configure(bg="#333"))
         self._scroll_btn.bind("<Leave>",    lambda _: self._scroll_btn.configure(bg=C["border"]))
+
+        # Status transitório (falhas de TTS/rede durante a leitura —
+        # antes o áudio só parava em silêncio, sem explicar por quê)
+        self._status_lbl = tk.Label(
+            t, text="",
+            font=FONTS["label"],
+            bg=C["panel"], fg=C["red_hot"],
+        )
+        self._status_lbl.pack(pady=(4, 0))
+
+    def _show_transient_status(self, text: str, error: bool = False, ms: int = 4000):
+        """Mostra uma mensagem curta perto do transporte (ex.: falha de TTS)
+        que some sozinha após `ms` milissegundos."""
+        if not self._alive:
+            return
+        color = C["red_hot"] if error else C["text_dim"]
+        self._status_lbl.configure(text=text, fg=color)
+        self._status_generation = getattr(self, "_status_generation", 0) + 1
+        gen = self._status_generation
+
+        def _clear():
+            if self._alive and getattr(self, "_status_generation", 0) == gen:
+                self._status_lbl.configure(text="")
+        self.after(ms, _clear)
 
     async def _read_loop(self):
         """
@@ -108,7 +129,6 @@ class ControlsMixin:
                 self.current_chunk_idx = 0
                 continue
 
-                
             start_idx = self.current_chunk_idx
             if start_idx >= len(chunks):
                 start_idx = 0
@@ -140,6 +160,8 @@ class ControlsMixin:
                 if self._stop.is_set():
                     break
                 if not audio:
+                    self.after(0, lambda: self._show_transient_status(
+                        "⚠ Falha ao gerar áudio — verifique sua conexão.", error=True))
                     continue
 
                 # Grifa o chunk completo imediatamente (garante fundo azul sempre)
@@ -164,7 +186,7 @@ class ControlsMixin:
 
                     pos = self.player.get_pos()
                     new_idx = word_idx
-                    for wi, (wb_start, wb_end, wb_rects) in enumerate(word_bboxes):
+                    for wi, (wb_start, wb_end, _wb_rects) in enumerate(word_bboxes):
                         if wb_start <= pos < wb_end:
                             new_idx = wi
                             break
@@ -176,7 +198,7 @@ class ControlsMixin:
                         rects = word_bboxes[word_idx][2]
                         if rects:
                             self._ephemeral_highlights = [
-                                {**r, "color": "#00E5FF", "opacity": 0.4}
+                                {**r, "color": C["info"], "opacity": 0.4}
                                 for r in rects
                             ]
                             if self._alive:
@@ -218,7 +240,7 @@ class ControlsMixin:
             self.player.unpause()
             self._play_lbl.configure(text="⏸")
             self._timer_running = True
-            import time; self._last_tick = time.time()
+            self._last_tick = time.time()
         else:
             self.player.pause()
             self._play_lbl.configure(text="▶")
@@ -287,8 +309,9 @@ class ControlsMixin:
         self._restart_loop()
 
     def _toggle_autoscroll(self):
-        """Liga/desliga o scroll automático."""
+        """Liga/desliga o scroll automático (preferência persistida)."""
         self._autoscroll_enabled = not self._autoscroll_enabled
+        prefs.set("autoscroll", self._autoscroll_enabled)
         if self._autoscroll_enabled:
             self._scroll_btn.configure(text="⇕ auto-scroll  ON",  fg=C["success"])
         else:

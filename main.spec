@@ -1,12 +1,26 @@
 # -*- mode: python ; coding: utf-8 -*-
+#
+# Build: pyinstaller main.spec
+# Gera dist/main.exe — NÃO commite dist/ nem build/ (ver .gitignore).
+#
+# `langdetect` carrega arquivos de dados (perfis de idioma) via pkgutil,
+# que o PyInstaller não detecta sozinho por análise estática — sem
+# collect_data_files() o .exe falha silenciosamente ao detectar idioma
+# em produção mesmo funcionando normalmente com `python main.py`.
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
+datas = []
+hiddenimports = []
+
+datas += collect_data_files("langdetect")
+hiddenimports += collect_submodules("bs4")
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

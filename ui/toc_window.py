@@ -1,6 +1,8 @@
 import tkinter as tk
 from tkinter import messagebox
+
 from config import C
+
 
 class TocMixin:
     def _show_toc(self):
@@ -76,10 +78,13 @@ class TocMixin:
                 self._restart_loop()
                 win.destroy()
 
-            def _hover_on(e, r=row, l=lbl, pl=page_lbl):
-                for w in (r, l, pl): w.configure(bg="#1C1C1C")
-            def _hover_off(e, r=row, l=lbl, pl=page_lbl):
-                for w in (r, l, pl): w.configure(bg=C["bg"])
+            def _hover_on(e, r=row, lb=lbl, pl=page_lbl):
+                for w in (r, lb, pl):
+                    w.configure(bg=C["panel_alt"])
+
+            def _hover_off(e, r=row, lb=lbl, pl=page_lbl):
+                for w in (r, lb, pl):
+                    w.configure(bg=C["bg"])
 
             for w in (row, lbl, page_lbl):
                 w.bind("<Button-1>", lambda e, fn=_go: fn())
@@ -88,3 +93,4 @@ class TocMixin:
 
         win.bind("<MouseWheel>", lambda e: canvas.yview_scroll(
             -1 if e.delta > 0 else 1, "units"))
+        win.bind("<Escape>", lambda _e: win.destroy())

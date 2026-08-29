@@ -1,9 +1,14 @@
 """
 core/player.py — controla reprodução de áudio via pygame.
 """
-import os
+import io
+import logging
+
 import pygame
+
 from config import TEMP_DIR
+
+log = logging.getLogger(__name__)
 
 
 class Player:
@@ -31,11 +36,18 @@ class Player:
         pygame.mixer.music.set_volume(self._volume)
 
     def play(self, data: bytes):
-        """Carrega e toca bytes MP3 da memória."""
-        import io
+        """Carrega e toca bytes MP3 da memória. Áudio vazio/corrompido é
+        ignorado com um log em vez de derrubar o loop de leitura."""
+        if not data:
+            log.debug("Player.play chamado com áudio vazio — ignorando.")
+            return
         self._offset_seconds = 0.0
-        pygame.mixer.music.load(io.BytesIO(data), "mp3")
-        pygame.mixer.music.play()
+        try:
+            pygame.mixer.music.load(io.BytesIO(data), "mp3")
+            pygame.mixer.music.play()
+        except Exception as e:
+            log.error("Falha ao reproduzir áudio (dados corrompidos?): %s", e)
+            return
         if self._paused:
             pygame.mixer.music.pause()
 

@@ -8,15 +8,17 @@ Busca definições de palavras.
   EN    : Free Dictionary API (api.dictionaryapi.dev)
   ES    : Free Dictionary API (api.dictionaryapi.dev)
 
-Dependências adicionais (adicione ao requirements.txt):
-    requests
-    beautifulsoup4
+Dependências: requests, beautifulsoup4 (ambas em requirements.txt).
 """
 
-import json
-import re
 import html as html_mod
+import json
+import logging
+import re
+import time
 import unicodedata
+
+log = logging.getLogger(__name__)
 
 # Usa requests se disponível (melhor handling de cookies/UA/redirects)
 # Fallback para urllib se não tiver
@@ -35,8 +37,9 @@ try:
     _HAS_REQUESTS = True
 except ImportError:
     _HAS_REQUESTS = False
-    import urllib.request
+    import urllib.error
     import urllib.parse
+    import urllib.request
 
 try:
     from bs4 import BeautifulSoup
@@ -44,8 +47,28 @@ try:
 except ImportError:
     _HAS_BS4 = False
 
-# Cache de definições já buscadas (evita requests repetidos)
-_dict_cache: dict = {}
+_UA_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "pt-BR,pt;q=0.9",
+}
+
+# Cache de definições já buscadas: chave → (valor, expira_em | None).
+# expira_em None = cacheado para sempre (resultado positivo real, não muda).
+# Resultados negativos ("não encontrado") ficam só _NEG_CACHE_TTL segundos,
+# para não travar permanentemente uma palavra que na verdade existe mas
+# falhou por instabilidade momentânea de um dos backends.
+_dict_cache: dict[str, tuple[dict | None, float | None]] = {}
+_NEG_CACHE_TTL = 600.0   # 10 minutos
+
+
+class DictionaryNetworkError(Exception):
+    """Falha de rede (timeout/conexão) ao consultar um backend de dicionário —
+    distinto de "palavra não encontrada", para a UI poder diferenciar as duas
+    mensagens (ver core.dictionary.lookup)."""
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -69,32 +92,40 @@ def _normalize_slug(word: str) -> str:
 
 
 def _get(url: str) -> bytes | None:
-    """GET com User-Agent de browser. Retorna bytes ou None."""
+    """
+    GET com User-Agent de browser.
+    Retorna bytes do corpo em caso de 200, None em outro status HTTP
+    (ex.: 404 → "palavra não encontrada" nesse backend).
+    Lança DictionaryNetworkError em falha de conexão/timeout — quem chama
+    decide se propaga ou tenta o próximo backend.
+    """
     if _HAS_REQUESTS:
         try:
             r = _SESSION.get(url, timeout=6)
-            if r.status_code == 200:
-                return r.content
-        except Exception:
-            pass
+        except (_requests.exceptions.ConnectionError, _requests.exceptions.Timeout) as e:
+            log.warning("Falha de rede ao acessar %s: %s", url, e)
+            raise DictionaryNetworkError(str(e)) from e
+        except Exception as e:
+            log.debug("Erro inesperado ao acessar %s: %s", url, e)
+            return None
+        if r.status_code == 200:
+            return r.content
+        log.debug("%s respondeu HTTP %d", url, r.status_code)
         return None
     else:
-        # fallback urllib — User-Agent de browser para evitar 403
         try:
-            req = urllib.request.Request(url, headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                "Accept-Language": "pt-BR,pt;q=0.9",
-            })
+            req = urllib.request.Request(url, headers=_UA_HEADERS)
             with urllib.request.urlopen(req, timeout=6) as r:
                 if r.status == 200:
                     return r.read()
-        except Exception:
-            pass
-        return None
+                log.debug("%s respondeu HTTP %d", url, r.status)
+                return None
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            log.warning("Falha de rede ao acessar %s: %s", url, e)
+            raise DictionaryNetworkError(str(e)) from e
+        except Exception as e:
+            log.debug("Erro inesperado ao acessar %s: %s", url, e)
+            return None
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -120,7 +151,8 @@ def _lookup_dicio(word: str) -> dict | None:
 
     try:
         soup = BeautifulSoup(raw.decode("utf-8", errors="replace"), "html.parser")
-    except Exception:
+    except Exception as e:
+        log.warning("Falha ao parsear HTML do dicio.com.br para %r: %s", word, e)
         return None
 
     # Página "não encontrada" tem elemento específico
@@ -178,7 +210,8 @@ def _lookup_wiktionary_pt(word: str) -> dict | None:
         return None
     try:
         data = json.loads(raw)
-    except Exception:
+    except Exception as e:
+        log.warning("Falha ao parsear JSON do Wiktionary para %r: %s", word, e)
         return None
 
     lang_data = data.get("pt") or data.get("en") or next(iter(data.values()), [])
@@ -222,7 +255,8 @@ def _lookup_free_dict(word: str, lang: str) -> dict | None:
         return None
     try:
         data = json.loads(raw)
-    except Exception:
+    except Exception as e:
+        log.warning("Falha ao parsear JSON do Free Dictionary (%s) para %r: %s", lang, word, e)
         return None
     if not isinstance(data, list) or not data:
         return None
@@ -262,11 +296,19 @@ def _lookup_free_dict(word: str, lang: str) -> dict | None:
 # API pública
 # ──────────────────────────────────────────────────────────────────
 
+def _try(fn, *args) -> tuple[dict | None, bool]:
+    """Executa `fn(*args)`, retorna (resultado, teve_erro_de_rede)."""
+    try:
+        return fn(*args), False
+    except DictionaryNetworkError:
+        return None, True
+
+
 def lookup(word: str, detected_lang: str | None = None) -> dict | None:
     """
     Busca a definição de uma palavra.
 
-    Cadeia PT-BR : dicio.com.br → Wiktionary → Free Dictionary EN
+    Cadeia PT-BR : dicio.com.br → Wiktionary → Free Dictionary EN → ES
     EN direto    : Free Dictionary EN
     ES direto    : Free Dictionary ES
 
@@ -276,31 +318,55 @@ def lookup(word: str, detected_lang: str | None = None) -> dict | None:
         lang        : str
         source      : str   ('dicio.com.br' | 'wiktionary' | 'freedictionary')
         meanings    : list[{part_of_speech, definitions: list[str]}]
-    Ou None se não encontrado / sem internet.
+    Retorna {"_network_error": True} se TODOS os backends tentados
+    falharam por problema de rede (permite a UI mostrar "sem internet"
+    em vez de "palavra não encontrada" — e não fica em cache, para que
+    uma nova tentativa funcione assim que a conexão voltar).
+    Retorna None se nenhum backend encontrou a palavra.
     """
     clean = _clean_word(word)
     if not clean or len(clean) < 2:
         return None
 
     cache_key = f"{clean}:{detected_lang}"
-    if cache_key in _dict_cache:
-        return _dict_cache[cache_key]
+    cached = _dict_cache.get(cache_key)
+    if cached is not None:
+        value, expires_at = cached
+        if expires_at is None or time.time() < expires_at:
+            return value
+        del _dict_cache[cache_key]
+
+    network_errors = 0
+    attempts = 0
+
+    def attempt(fn, *args):
+        nonlocal network_errors, attempts
+        attempts += 1
+        result, had_error = _try(fn, *args)
+        if had_error:
+            network_errors += 1
+        return result
 
     if detected_lang == "en":
-        result = _lookup_free_dict(clean, "en")
+        result = attempt(_lookup_free_dict, clean, "en")
     elif detected_lang == "es":
-        result = _lookup_free_dict(clean, "es")
+        result = attempt(_lookup_free_dict, clean, "es")
     else:
-        # PT-BR: dicio → wiktionary → en fallback
-        result = _lookup_dicio(clean)
+        # PT-BR: dicio → wiktionary → en fallback → es fallback
+        result = attempt(_lookup_dicio, clean)
         if not result:
-            result = _lookup_wiktionary_pt(clean)
+            result = attempt(_lookup_wiktionary_pt, clean)
         if not result:
-            result = _lookup_free_dict(clean, "en")
+            result = attempt(_lookup_free_dict, clean, "en")
         if not result:
-            result = _lookup_free_dict(clean, "es")
+            result = attempt(_lookup_free_dict, clean, "es")
 
-    _dict_cache[cache_key] = result
+    if result is None and attempts > 0 and network_errors == attempts:
+        log.info("Todos os backends de dicionário falharam por rede para %r.", clean)
+        return {"_network_error": True}   # não cacheia — permite nova tentativa
+
+    expires_at = (time.time() + _NEG_CACHE_TTL) if result is None else None
+    _dict_cache[cache_key] = (result, expires_at)
     return result
 
 
@@ -310,5 +376,6 @@ def detect_lang(text: str) -> str | None:
         from langdetect import detect
         code = detect(text)
         return {"pt": "pt-BR", "en": "en", "es": "es"}.get(code)
-    except Exception:
+    except Exception as e:
+        log.debug("Detecção de idioma falhou (ignorado): %s", e)
         return None

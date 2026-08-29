@@ -3,32 +3,28 @@ data/library.py — lê e escreve library.json.
 Toda persistência de livros passa por aqui.
 Cache em memória evita I/O redundante a cada operação.
 """
-import json
+import logging
+
 from config import LIBRARY_FILE
+from data._jsonio import load_json, save_json
+
+log = logging.getLogger(__name__)
 
 _cache: dict | None = None
 
 
 def _load() -> dict:
     global _cache
-    if _cache is not None:
-        return _cache
-    if LIBRARY_FILE.exists():
-        try:
-            _cache = json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
-            return _cache
-        except Exception:
-            pass
-    _cache = {}
+    if _cache is None:
+        _cache = load_json(LIBRARY_FILE, {})
     return _cache
 
 
 def _save(data: dict):
     global _cache
     _cache = data
-    LIBRARY_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    if not save_json(LIBRARY_FILE, data):
+        log.error("Biblioteca não pôde ser salva — alterações desta sessão podem ser perdidas.")
 
 
 def all_books() -> dict:

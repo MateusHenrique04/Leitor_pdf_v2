@@ -1,11 +1,14 @@
-import threading
 import logging
+import threading
 import tkinter as tk
-from PIL import Image, ImageTk, ImageDraw
 
-from config import C, PDF_RENDER_DPI
-import data.library as lib
+from PIL import Image, ImageDraw, ImageTk
+
 import data.highlights as highlights
+import data.library as lib
+import data.prefs as prefs
+from config import DEFAULT_HIGHLIGHT_COLOR, FONTS, PDF_RENDER_DPI, C
+from ui.widgets import flat_button
 
 log = logging.getLogger(__name__)
 
@@ -45,19 +48,15 @@ class ViewerMixin:
         zoom_row.grid(row=1, column=1, sticky="e", padx=8)
 
         def _zoom_btn(parent, text, cmd):
-            b = tk.Label(parent, text=text,
-                         font=("Courier", 11, "bold"),
-                         bg=C["border"], fg=C["text"],
-                         cursor="hand2", padx=8, pady=2)
+            b = flat_button(parent, text, cmd,
+                             font=FONTS["mono_bold"], bg=C["border"], fg=C["text"],
+                             hover_bg="#333", padx=8, pady=2)
             b.pack(side="left", padx=2)
-            b.bind("<Button-1>", lambda _: cmd())
-            b.bind("<Enter>",    lambda _, bb=b: bb.configure(bg="#333"))
-            b.bind("<Leave>",    lambda _, bb=b: bb.configure(bg=C["border"]))
             return b
 
         _zoom_btn(zoom_row, "−", self._zoom_out)
         self._zoom_lbl = tk.Label(zoom_row, text="100%",
-                                   font=("Courier", 9, "bold"),
+                                   font=FONTS["mono_bold"],
                                    bg=C["panel"], fg=C["text_dim"],
                                    width=5, anchor="center")
         self._zoom_lbl.pack(side="left")
@@ -99,7 +98,7 @@ class ViewerMixin:
         self._search_var = tk.StringVar()
         self._search_entry = tk.Entry(
             self._search_bar, textvariable=self._search_var,
-            font=("Georgia", 11), bg="#1C1C1C", fg=C["text"],
+            font=("Georgia", 11), bg=C["panel_alt"], fg=C["text"],
             insertbackground=C["text"], relief="flat", bd=4,
         )
         self._search_entry.pack(side="left", fill="x", expand=True, pady=6)
@@ -131,7 +130,7 @@ class ViewerMixin:
 
         # Canvas para exibir a imagem da página
         self._canvas = tk.Canvas(
-            viewer, bg="#1A1A1A",
+            viewer, bg=C["canvas_bg"],
             highlightthickness=0, bd=0,
         )
         self._canvas.grid(row=2, column=0, sticky="nsew")
@@ -203,7 +202,7 @@ class ViewerMixin:
         # Desenha efêmeros (TTS) — respeita opacity individual
         if self._ephemeral_highlights:
             for h in self._ephemeral_highlights:
-                r, g, b = self._hex_to_rgb(h.get("color", "#00E5FF"))
+                r, g, b = self._hex_to_rgb(h.get("color", C["info"]))
                 a = int(h.get("opacity", 0.35) * 255)
                 draw.rectangle(
                     [h["x0"]*zoom_pdf, h["y0"]*zoom_pdf,
@@ -215,7 +214,7 @@ class ViewerMixin:
         if self.current_path:
             saved_h = highlights.get(self.current_path, self.current_page + 1)
             for h in saved_h:
-                r, g, b = self._hex_to_rgb(h.get("color", "#FFDD00"))
+                r, g, b = self._hex_to_rgb(h.get("color", DEFAULT_HIGHLIGHT_COLOR))
                 a = int(h.get("opacity", 0.35) * 255)
                 draw.rectangle([h["x0"]*zoom_pdf, h["y0"]*zoom_pdf, h["x1"]*zoom_pdf, h["y1"]*zoom_pdf], fill=(r, g, b, a))
 
@@ -266,25 +265,54 @@ class ViewerMixin:
 
     def _zoom_in(self):
         self._zoom = min(self._zoom_max, round(self._zoom + 0.25, 2))
+        prefs.set("zoom", self._zoom)
         self._redraw()
 
     def _zoom_out(self):
         self._zoom = max(self._zoom_min, round(self._zoom - 0.25, 2))
         if self._zoom <= 1.0:
             self._pan_x = self._pan_y = 0
+        prefs.set("zoom", self._zoom)
         self._redraw()
 
     def _zoom_reset(self):
         self._zoom  = 1.0
         self._pan_x = self._pan_y = 0
+        prefs.set("zoom", self._zoom)
         self._redraw()
 
+    # Máscara do bit "Control" no state de eventos do Tkinter (Windows/X11)
+    _CONTROL_MASK = 0x0004
+
     def _on_mousewheel(self, event):
+        """
+        Antes, a roda do mouse SEMPRE dava zoom — fora da convenção usual
+        de leitores de PDF (a maioria reserva Ctrl+roda para zoom e usa a
+        roda normal para rolar/passar de página).
+
+        Agora: Ctrl+roda = zoom (como antes). Roda normal: se a página
+        está com zoom ativo, faz pan vertical; se está no tamanho de
+        ajuste (100%), passa para a página anterior/seguinte.
+        """
         # Windows: event.delta (+120 / -120), Linux: Button-4/5
-        if event.num == 4 or event.delta > 0:
-            self._zoom_in()
+        scroll_up = event.num == 4 or (hasattr(event, "delta") and event.delta > 0)
+        ctrl_held = bool(event.state & self._CONTROL_MASK)
+
+        if ctrl_held:
+            if scroll_up:
+                self._zoom_in()
+            else:
+                self._zoom_out()
+            return
+
+        if self._zoom > 1.01:
+            self._pan_y += 60 if scroll_up else -60
+            self._redraw()
         else:
-            self._zoom_out()
+            if scroll_up:
+                self._prev_page()
+            else:
+                self._next_page()
 
     def _on_canvas_press(self, event):
         if self._hl_mode:
@@ -394,7 +422,7 @@ class ViewerMixin:
         hits = self.renderer.search_text(self.current_page, term)
         for bbox in hits:
             bbox["_search"] = True
-            bbox["color"]   = "#FFD600"
+            bbox["color"]   = C["search"]
             self._search_results.append({"page": self.current_page, "bbox": bbox})
         # Busca no restante das páginas em background
         threading.Thread(target=self._search_all_pages,
@@ -414,7 +442,7 @@ class ViewerMixin:
                 hits = []
             for bbox in hits:
                 bbox["_search"] = True
-                bbox["color"]   = "#FFD600"
+                bbox["color"]   = C["search"]
                 results.append({"page": p, "bbox": bbox})
         # Ordena por página e mescla com os resultados da página atual
         if self._alive and self._search_var.get().strip() == term:
@@ -451,21 +479,15 @@ class ViewerMixin:
             self._prog_var.set(page + 1)
             self._page_lbl.configure(text=f"PÁG. {page + 1} / {self.total_pages}")
             threading.Thread(target=self._render_and_draw, args=(page,), daemon=True).start()
-        # Destaca o resultado no canvas
+        # Destaca todos os resultados da página atual; o resultado corrente
+        # (identificado por identidade do objeto, não por índice — a versão
+        # anterior sempre pintava o primeiro da lista, nunca o realmente
+        # selecionado) fica em laranja, os demais em amarelo.
         self._ephemeral_highlights = [
-            {**r["bbox"], "color": "#FFD600", "_search": True}
+            {**r["bbox"], "_search": True,
+             "color": C["warn"] if r is result else C["search"]}
             for r in self._search_results if r["page"] == page
         ]
-        # Resultado atual em laranja
-        try:
-            self._ephemeral_highlights[
-                [r["page"] for r in self._search_results if r["page"] == page].index(page)
-                if page in [r["page"] for r in self._search_results] else 0
-            ]["color"] = "#FF6D00"
-        except IndexError:
-            pass
-        if self._ephemeral_highlights:
-            self._ephemeral_highlights[0]["color"] = "#FF6D00"
         # Centraliza no resultado via pan
         zoom_pdf = PDF_RENDER_DPI / 72.0
         y_center_pdf = (bbox["y0"] + bbox["y1"]) / 2.0

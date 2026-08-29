@@ -1,6 +1,9 @@
 import tkinter as tk
 from tkinter import messagebox
-from config import C
+
+from config import FONTS, C
+from ui.widgets import flat_button
+
 
 class FocusMixin:
     def _open_focus_dialog(self):
@@ -23,7 +26,7 @@ class FocusMixin:
         # Janela de configuração
         dlg = tk.Toplevel(self)
         dlg.title("Modo Foco")
-        dlg.configure(bg="#0E0E0E")
+        dlg.configure(bg=C["bg"])
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
@@ -33,7 +36,7 @@ class FocusMixin:
 
         tk.Label(dlg, text="🎯  MODO FOCO",
                  font=("Georgia", 14, "bold"),
-                 bg="#0E0E0E", fg=C["text"],
+                 bg=C["bg"], fg=C["text"],
                  pady=16).pack()
 
         tk.Label(dlg,
@@ -41,7 +44,7 @@ class FocusMixin:
                       "trocar de livro nem sair do app\n"
                       "sem confirmar.",
                  font=("Georgia", 9),
-                 bg="#0E0E0E", fg=C["text_dim"],
+                 bg=C["bg"], fg=C["text_dim"],
                  justify="center").pack(pady=(0, 14))
 
         tk.Frame(dlg, bg=C["border"], height=1).pack(fill="x", padx=20)
@@ -49,13 +52,13 @@ class FocusMixin:
         # Presets de duração
         tk.Label(dlg, text="DURAÇÃO",
                  font=("Courier", 8, "bold"),
-                 bg="#0E0E0E", fg=C["text_dim"]).pack(anchor="w", padx=20, pady=(12, 4))
+                 bg=C["bg"], fg=C["text_dim"]).pack(anchor="w", padx=20, pady=(12, 4))
 
         presets = [("15 min", 15), ("25 min", 25), ("30 min", 30),
                    ("45 min", 45), ("60 min", 60), ("90 min", 90)]
         self._focus_minutes = tk.IntVar(value=25)
 
-        preset_frame = tk.Frame(dlg, bg="#0E0E0E")
+        preset_frame = tk.Frame(dlg, bg=C["bg"])
         preset_frame.pack(padx=20, fill="x")
         btn_refs = []
 
@@ -85,11 +88,11 @@ class FocusMixin:
         # Campo personalizado
         tk.Label(dlg, text="OU TEMPO PERSONALIZADO (minutos)",
                  font=("Courier", 8, "bold"),
-                 bg="#0E0E0E", fg=C["text_dim"]).pack(anchor="w", padx=20, pady=(12, 4))
+                 bg=C["bg"], fg=C["text_dim"]).pack(anchor="w", padx=20, pady=(12, 4))
 
         custom_entry = tk.Entry(
             dlg, font=("Courier", 12, "bold"),
-            bg="#1C1C1C", fg=C["text"],
+            bg=C["panel_alt"], fg=C["text"],
             insertbackground=C["text"],
             relief="flat", bd=6, justify="center", width=8,
         )
@@ -111,7 +114,7 @@ class FocusMixin:
         tk.Frame(dlg, bg=C["border"], height=1).pack(fill="x", padx=20, pady=14)
 
         # Botões
-        btn_row = tk.Frame(dlg, bg="#0E0E0E")
+        btn_row = tk.Frame(dlg, bg=C["bg"])
         btn_row.pack(padx=20, pady=(0, 20), fill="x")
 
         def _cancel_dlg():
@@ -124,23 +127,18 @@ class FocusMixin:
             dlg.destroy()
             self._focus_start(mins)
 
-        cancel_btn = tk.Label(btn_row, text="Cancelar",
-                              font=("Courier", 9),
-                              bg=C["border"], fg=C["text_dim"],
-                              cursor="hand2", padx=16, pady=8, anchor="center")
+        cancel_btn = flat_button(btn_row, "Cancelar", _cancel_dlg,
+                                  font=FONTS["mono"], bg=C["border"], fg=C["text_dim"],
+                                  hover_bg="#333", padx=16, pady=8)
         cancel_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        cancel_btn.bind("<Button-1>",  lambda _: _cancel_dlg())
-        cancel_btn.bind("<Enter>",     lambda _: cancel_btn.configure(bg="#333"))
-        cancel_btn.bind("<Leave>",     lambda _: cancel_btn.configure(bg=C["border"]))
 
-        start_btn = tk.Label(btn_row, text="🎯  Iniciar Foco",
-                             font=("Courier", 9, "bold"),
-                             bg=C["red"], fg="#fff",
-                             cursor="hand2", padx=16, pady=8, anchor="center")
+        start_btn = flat_button(btn_row, "🎯  Iniciar Foco", _start,
+                                 font=FONTS["mono_bold"], bg=C["red"], fg="#fff",
+                                 hover_bg=C["red_hot"], padx=16, pady=8)
         start_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
-        start_btn.bind("<Button-1>",  lambda _: _start())
-        start_btn.bind("<Enter>",     lambda _: start_btn.configure(bg=C["red_hot"]))
-        start_btn.bind("<Leave>",     lambda _: start_btn.configure(bg=C["red"]))
+
+        dlg.bind("<Escape>", lambda _e: _cancel_dlg())
+        dlg.bind("<Return>", lambda _e: _start())
 
         # Centraliza a janela sobre o app
         dlg.update_idletasks()
@@ -158,7 +156,7 @@ class FocusMixin:
         # Atualiza botão
         self._focus_btn.configure(
             text="🔴 Foco ativo — cancelar",
-            fg_color="#3A0000",
+            fg_color=C["red_deep"],
             border_color=C["red"],
             text_color=C["red"],
         )
@@ -219,7 +217,6 @@ class FocusMixin:
         m, s = divmod(remaining, 60)
         time_str = f"{m}min {s:02d}s" if m else f"{s}s"
         # Pisca o label do foco em vermelho vivo
-        original_fg = C["success"]
         self._focus_lbl.configure(
             text=f"🔒 bloqueado  ({time_str})",
             fg=C["red_hot"],

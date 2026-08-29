@@ -1,0 +1,5 @@
+# Dependências extras para desenvolvimento (testes e lint).
+# Instale com: pip install -r requirements.txt -r requirements-dev.txt
+-r requirements.txt
+pytest>=8.0.0
+ruff>=0.6.0

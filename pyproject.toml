@@ -1,0 +1,16 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [".venv_check", "build", "dist"]
+
+[tool.ruff.lint]
+# Conjunto enxuto de início — erros/pyflakes, imports e bugs comuns.
+# Não inclui regras de estilo agressivas para não gerar um diff gigante
+# num projeto que nunca teve lint antes; aperte gradualmente.
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "E501",  # linha longa — já controlado por line-length, mas listas/f-strings de UI variam
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

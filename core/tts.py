@@ -2,8 +2,11 @@
 core/tts.py — gera áudio via edge-tts.
 Para trocar o motor de TTS, edite só este arquivo.
 """
-import asyncio
+import logging
+
 import edge_tts
+
+log = logging.getLogger(__name__)
 
 
 async def speak(text: str, voice: str, speed_pct: int) -> tuple[bytes, list[dict]]:
@@ -14,6 +17,10 @@ async def speak(text: str, voice: str, speed_pct: int) -> tuple[bytes, list[dict
     start/end em segundos — usados pelo autoscroll para sincronizar o pan.
 
     speed_pct: -50 a +100 (% relativo à velocidade normal)
+
+    Em caso de falha (sem internet, voz indisponível, timeout), loga o
+    motivo e retorna (b"", []) sem derrubar o app — quem chama (ui/controls.py)
+    trata áudio vazio como "pular este trecho" e mostra um aviso ao usuário.
     """
     text = text.strip()
     if not text:
@@ -24,7 +31,6 @@ async def speak(text: str, voice: str, speed_pct: int) -> tuple[bytes, list[dict
 
     buf      = b""
     timings  = []          # [{word, start, end}]
-    last_end = 0.0
 
     try:
         async for msg in comm.stream():
@@ -40,12 +46,18 @@ async def speak(text: str, voice: str, speed_pct: int) -> tuple[bytes, list[dict
                     "start": start_s,
                     "end":   end_s,
                 })
-                last_end = end_s
     except edge_tts.exceptions.NoAudioReceived:
-        # Sem internet ou voz indisponível — retorna vazio sem derrubar o app
+        log.warning("TTS: nenhum áudio recebido (rede instável ou voz indisponível) "
+                    "para o trecho: %r", text[:60])
         return b"", []
-    except Exception:
-        # Qualquer outro erro (rede, timeout, caracteres inválidos) — ignora o chunk
+    except TimeoutError as e:
+        log.warning("TTS: timeout ao gerar áudio: %s", e)
         return b"", []
+    except Exception as e:
+        log.error("TTS: erro ao gerar áudio (rede, voz ou serviço indisponível): %s", e)
+        return b"", []
+
+    if not buf:
+        log.warning("TTS: áudio vazio retornado sem exceção para o trecho: %r", text[:60])
 
     return buf, timings

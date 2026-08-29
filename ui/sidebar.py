@@ -1,13 +1,19 @@
+import asyncio
+import logging
 import os
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
+
 import customtkinter as ctk
 
-from config import C
-from core.pdf_renderer import PDFRenderer
-import data.library as lib
 import data.highlights as highlights
+import data.library as lib
+from config import FONTS, C
+from core.pdf_renderer import PDFOpenError, PDFRenderer
+from ui.widgets import flat_button
+
+log = logging.getLogger(__name__)
 
 class SidebarMixin:
     def _build_sidebar(self):
@@ -19,22 +25,19 @@ class SidebarMixin:
         logo = tk.Frame(sb, bg=C["panel"])
         logo.pack(fill="x", pady=(24, 0))
         tk.Frame(logo, bg=C["red"], width=3, height=32).place(x=20, y=4)
-        tk.Label(logo, text="LECTOR", font=("Georgia", 20, "bold"),
+        tk.Label(logo, text="LECTOR", font=FONTS["logo"],
                  bg=C["panel"], fg=C["text"]).pack(padx=(30, 0), anchor="w")
-        tk.Label(logo, text="pdf audiobook", font=("Courier", 8),
+        tk.Label(logo, text="pdf audiobook", font=FONTS["label"],
                  bg=C["panel"], fg=C["text_dim"]).pack(padx=(31, 0), anchor="w", pady=(2, 16))
 
         tk.Frame(sb, bg=C["border"], height=1).pack(fill="x")
 
-        # Botão adicionar
-        add = tk.Label(sb, text="＋  Abrir PDF",
-                       font=("Georgia", 11, "bold"),
-                       bg=C["red"], fg="#fff",
-                       cursor="hand2", pady=10, anchor="center")
+        # Botão adicionar (Ctrl+O também abre)
+        add = flat_button(
+            sb, "＋  Abrir PDF", self._open_file,
+            font=FONTS["body_bold"], bg=C["red"], fg="#fff", hover_bg=C["red_hot"],
+        )
         add.pack(fill="x", padx=16, pady=14)
-        add.bind("<Button-1>", lambda _: self._open_file())
-        add.bind("<Enter>",    lambda _: add.configure(bg=C["red_hot"]))
-        add.bind("<Leave>",    lambda _: add.configure(bg=C["red"]))
 
         tk.Frame(sb, bg=C["border"], height=1).pack(fill="x")
 
@@ -49,7 +52,7 @@ class SidebarMixin:
             selected_hover_color=C["red_hot"],
             text_color="#888",
             unselected_color=C["panel"],
-            unselected_hover_color="#2E2E2E"
+            unselected_hover_color=C["hover"]
         )
         seg_btn.pack(fill="x", padx=16, pady=(14, 8))
 
@@ -65,12 +68,12 @@ class SidebarMixin:
     def _refresh_lib(self):
         for w in self._lib_frame.winfo_children():
             w.destroy()
-        
+
         is_finished_tab = (self._lib_tab_var.get() == "Lidos")
-        
-        books = {p: v for p, v in lib.all_books().items() 
+
+        books = {p: v for p, v in lib.all_books().items()
                  if os.path.exists(p) and v.get("finished", False) == is_finished_tab}
-        
+
         if not books:
             tk.Label(self._lib_frame, text="Nenhum livro.",
                      font=("Courier", 8), bg=C["panel"],
@@ -87,7 +90,7 @@ class SidebarMixin:
                            bg=C["panel"], fg=C["red"], padx=10)
             dot.pack(side="left")
             lbl = tk.Label(row, text=disp, font=("Georgia", 10),
-                           bg=C["panel"], fg="#909090",
+                           bg=C["panel"], fg=C["text_soft"],
                            anchor="w", pady=6)
             lbl.pack(side="left", fill="x", expand=True)
 
@@ -111,22 +114,30 @@ class SidebarMixin:
                               padx=8, pady=4, cursor="hand2")
             btn_rm.pack(side="right")
 
-            def _open(p=path): self._load_book(p)
-            def _remove(p=path): self._remove_book(p)
+            def _open(p=path):
+                self._load_book(p)
 
-            def _on(e, r=row, d=dot, l=lbl, o=outer, pl=pct_lbl, b=btn_rm):
-                for w in (r, d, l, o, pl, b): w.configure(bg="#1C1C1C")
+            def _remove(p=path):
+                self._remove_book(p)
+
+            def _on(e, r=row, d=dot, lb=lbl, o=outer, pl=pct_lbl, b=btn_rm):
+                for w in (r, d, lb, o, pl, b):
+                    w.configure(bg=C["panel_alt"])
                 b.configure(fg=C["red"])
-            def _off(e, r=row, d=dot, l=lbl, o=outer, pl=pct_lbl, b=btn_rm):
-                for w in (r, d, l, o, pl, b): w.configure(bg=C["panel"])
+
+            def _off(e, r=row, d=dot, lb=lbl, o=outer, pl=pct_lbl, b=btn_rm):
+                for w in (r, d, lb, o, pl, b):
+                    w.configure(bg=C["panel"])
                 b.configure(fg=C["text_dim"])
 
             for w in (outer, row, dot, lbl, pct_lbl):
                 w.bind("<Button-1>", lambda e, fn=_open: fn())
-                w.bind("<Enter>", _on); w.bind("<Leave>", _off)
+                w.bind("<Enter>", _on)
+                w.bind("<Leave>", _off)
 
             btn_rm.bind("<Button-1>", lambda e, fn=_remove: fn())
-            btn_rm.bind("<Enter>", _on); btn_rm.bind("<Leave>", _off)
+            btn_rm.bind("<Enter>", _on)
+            btn_rm.bind("<Leave>", _off)
 
     def _remove_book(self, path: str):
         """Remove o livro da biblioteca após confirmação."""
@@ -168,6 +179,13 @@ class SidebarMixin:
         self._refresh_lib()
 
     def _load_book(self, path: str):
+        """
+        Troca de livro. Abrir um PDF (PDFRenderer.__init__) pode ser lento
+        em livros grandes — varre todas as páginas para detectar
+        cabeçalho/rodapé — então roda em uma thread de background e nunca
+        trava a UI. Também nunca deixa `current_path` apontando para um
+        livro que falhou ao abrir (estado inconsistente da versão anterior).
+        """
         # Bloqueia troca de livro durante o modo foco
         if self._focus_active and path != self.current_path:
             self._focus_blocked_feedback()
@@ -178,11 +196,59 @@ class SidebarMixin:
         if self.renderer:
             self.renderer.close()
             self.renderer = None
+        self.current_path = None
 
+        name = os.path.basename(path)
+        disp_name = name[:50] + "…" if len(name) > 50 else name
+        self._title_lbl.configure(text=f"Abrindo {disp_name}…")
+        self._page_lbl.configure(text="")
+        self._canvas.delete("all")
+        self._canvas_img_ref = None
+
+        threading.Thread(
+            target=self._open_book_bg, args=(path,), daemon=True,
+        ).start()
+
+    def _open_book_bg(self, path: str):
+        """Roda em background: abre o PDF (fitz.open + varredura de
+        cabeçalho/rodapé) e agenda o resultado (sucesso ou erro) na UI."""
+        try:
+            renderer = PDFRenderer(path)
+        except PDFOpenError as e:
+            # `e` é apagado pelo Python ao sair do bloco `except`, então
+            # precisa virar uma variável local antes do self.after diferido
+            # capturá-la na lambda — senão vira NameError quando o
+            # callback roda de fato.
+            msg = str(e)
+            log.warning("Não foi possível abrir %r: %s", path, msg)
+            if self._alive:
+                self.after(0, lambda: self._on_book_open_failed(path, msg))
+            return
+        except Exception as e:
+            msg = str(e)
+            log.error("Erro inesperado ao abrir %r: %s", path, msg)
+            if self._alive:
+                self.after(0, lambda: self._on_book_open_failed(path, msg))
+            return
+        if self._alive:
+            self.after(0, lambda: self._on_book_opened(path, renderer))
+
+    def _on_book_open_failed(self, path: str, error_msg: str):
+        """Chamado na UI thread quando a abertura do PDF falha — mostra um
+        erro claro em vez de travar/deixar o app num estado inconsistente."""
+        self._title_lbl.configure(text="Nenhum livro aberto")
+        name = os.path.basename(path)
+        messagebox.showerror(
+            "Não foi possível abrir o PDF",
+            f'Não foi possível abrir "{name}".\n\n{error_msg}',
+        )
+
+    def _on_book_opened(self, path: str, renderer: PDFRenderer):
+        """Chamado na UI thread quando o PDF abriu com sucesso."""
         self.current_path = path
-        self.renderer     = PDFRenderer(path)
-        self.total_pages  = self.renderer.total
-        
+        self.renderer      = renderer
+        self.total_pages   = renderer.total
+
         book_meta = lib.get(path)
         self.current_page = book_meta.get("last_page", 0)
         self.current_chunk_idx = book_meta.get("last_chunk_idx", 0)
@@ -199,7 +265,6 @@ class SidebarMixin:
         self._stop.clear()
         self._show_page(self.current_page)
 
-        import asyncio
         # Inicia o loop de leitura
         threading.Thread(target=lambda: asyncio.run(self._read_loop()),
                          daemon=True).start()

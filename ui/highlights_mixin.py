@@ -1,8 +1,9 @@
 import os
-import tkinter as tk
-from tkinter import messagebox, filedialog
-from config import C
+from tkinter import filedialog, messagebox
+
 import data.highlights as highlights
+from config import DEFAULT_HIGHLIGHT_COLOR, C
+
 
 class HighlightsMixin:
     def _toggle_hl_mode(self):
@@ -221,7 +222,7 @@ class HighlightsMixin:
             group = []
 
         if not group:
-            lines = [l for l in self._current_text.split("\n") if len(l.strip()) > 5]
+            lines = [ln for ln in self._current_text.split("\n") if len(ln.strip()) > 5]
             for line in lines:
                 try:
                     partial = self.renderer.search_text(self.current_page, line)
@@ -255,7 +256,7 @@ class HighlightsMixin:
         self._eph_y_cursor = max(r["y1"] for r in best_group)
 
         for m in best_group:
-            m["color"]   = "#00E5FF"
+            m["color"]   = C["info"]
             m["opacity"] = 0.35
             self._ephemeral_highlights.append(m)
 
@@ -320,13 +321,13 @@ class HighlightsMixin:
                 # Extrai o texto do trecho grifado via PDFRenderer
                 try:
                     page_obj = self.renderer._doc[page_num - 1]
-                    rect = __import__("fitz").Rect(h["x0"], h["y0"],
+                    rect = __import__("pymupdf").Rect(h["x0"], h["y0"],
                                                    h["x1"], h["y1"])
                     text = page_obj.get_text("text", clip=rect).strip()
                     text = " ".join(text.split())  # normaliza espaços/quebras
                 except Exception:
                     text = "(texto não extraível)"
-                color = h.get("color", "#FFDD00")
+                color = h.get("color", DEFAULT_HIGHLIGHT_COLOR)
                 lines.append(f"> {text}")
                 lines.append(f"<!-- cor: {color} -->")
                 lines.append("")

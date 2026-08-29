@@ -1,6 +1,8 @@
 # Ambientes virtuais
 venv/
 env/
+.venv/
+.venv_check/
 .env
 
 # Cache do Python
@@ -8,12 +10,32 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Artefatos de build (PyInstaller) — nunca commitar binários gerados.
+# Gere localmente com: pyinstaller main.spec
+build/
+dist/
+
 # Arquivos temporários de áudio
 .tmp_audio/
 *.mp3
 *.vtt
 
-# Dados do usuário
+# Dados do usuário / estado de máquina local
 history.json
 library.json
 highlights.json
+prefs.json
+*.json.tmp
+*.json.corrupted
+.window_geometry
+
+# Testes e lint
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# Editores
+.vscode/
+.idea/

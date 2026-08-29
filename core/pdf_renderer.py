@@ -7,29 +7,57 @@ Responsabilidade única: abrir um PDF e fornecer:
   - total_pages     → int
 
 Usa PyMuPDF (fitz). Para trocar a biblioteca de renderização, edite só este arquivo.
+
+Nota de performance: __init__ varre todas as páginas do documento para
+detectar cabeçalhos/rodapés repetidos, o que pode ser perceptível em
+livros grandes. Por isso a UI (ui/sidebar.py) cria PDFRenderer em uma
+thread de background, nunca na thread principal.
 """
 
+import logging
 import re
 import unicodedata
-from collections import defaultdict
-import fitz          # PyMuPDF
+from collections import OrderedDict, defaultdict
+
+import pymupdf as fitz  # PyMuPDF (novo nome do pacote; `fitz` está deprecated)
 from PIL import Image
-import io
 
 from config import PDF_RENDER_DPI
+
+log = logging.getLogger(__name__)
+
+
+class PDFOpenError(Exception):
+    """Erro ao abrir um PDF: arquivo corrompido, protegido por senha,
+    ou que não é um PDF válido. Mensagem já é segura para exibir ao usuário."""
 
 
 class PDFRenderer:
     def __init__(self, filepath: str):
-        self._doc   = fitz.open(filepath)
+        try:
+            self._doc = fitz.open(filepath)
+        except Exception as e:
+            log.error("Falha ao abrir PDF %r: %s", filepath, e)
+            raise PDFOpenError(
+                f"Não foi possível abrir o arquivo.\nDetalhes: {e}"
+            ) from e
+
+        if self._doc.needs_pass:
+            self._doc.close()
+            raise PDFOpenError("Este PDF está protegido por senha.")
+
         self.total  = len(self._doc)
-        self._cache: dict[int, Image.Image] = {}   # cache de páginas já renderizadas
+        if self.total == 0:
+            self._doc.close()
+            raise PDFOpenError("O PDF não contém nenhuma página.")
+
+        self._cache: OrderedDict[int, Image.Image] = OrderedDict()   # LRU de páginas renderizadas
 
         # Detecta cabeçalhos/rodapés repetidos (≥30% das páginas) para remover do TTS
         hdr: dict[str, int] = {}
         ftr: dict[str, int] = {}
         for page in self._doc:
-            lines = [l.strip() for l in page.get_text().split("\n") if l.strip()]
+            lines = [ln.strip() for ln in page.get_text().split("\n") if ln.strip()]
             if lines:
                 hdr[lines[0]]  = hdr.get(lines[0], 0) + 1
             if len(lines) > 1:
@@ -41,21 +69,21 @@ class PDFRenderer:
     def render_page(self, n: int) -> Image.Image:
         """Renderiza a página n (0-indexed) e retorna uma imagem PIL."""
         if n in self._cache:
+            self._cache.move_to_end(n)   # LRU: marca como usada recentemente
             return self._cache[n]
         mat  = fitz.Matrix(PDF_RENDER_DPI / 72, PDF_RENDER_DPI / 72)
         pix  = self._doc[n].get_pixmap(matrix=mat, alpha=False)
         img  = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        # Limita cache a 10 páginas para não consumir muita RAM
+        # Limita cache a 10 páginas para não consumir muita RAM (política LRU real)
         if len(self._cache) >= 10:
-            oldest = next(iter(self._cache))
-            del self._cache[oldest]
+            self._cache.popitem(last=False)
         self._cache[n] = img
         return img
 
     def text_for_page(self, n: int) -> str:
         """Retorna o texto limpo da página n (0-indexed) para o TTS."""
         raw   = unicodedata.normalize("NFKC", self._doc[n].get_text())
-        lines = [l for l in raw.split("\n") if l.strip() not in self._skip]
+        lines = [ln for ln in raw.split("\n") if ln.strip() not in self._skip]
         text  = "\n".join(lines)
         # Corrige hifenização de fim de linha
         text  = re.sub(r"(\w+)-\n(\w+)", r"\1\2", text)
@@ -99,11 +127,15 @@ class PDFRenderer:
                     r = q.rect
                     rects.append({"x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1})
                 return rects
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("search_for(quads=True) falhou na página %d: %s", n, e)
 
         # Fallback search_for sem quads
-        matches = page.search_for(text.strip())
+        try:
+            matches = page.search_for(text.strip())
+        except Exception as e:
+            log.debug("search_for() falhou na página %d: %s", n, e)
+            matches = []
         if matches:
             return [{"x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1} for r in matches]
 
@@ -248,7 +280,6 @@ class PDFRenderer:
         for w in page.get_text("words"):
             x0, y0, x1, y1, word = w[0], w[1], w[2], w[3], w[4]
             if x0 <= pdf_x <= x1 and y0 <= pdf_y <= y1:
-                import re
                 return re.sub(r"[^\w\-']", "", word).strip() or None
         return None
 
@@ -261,8 +292,14 @@ class PDFRenderer:
         for adj in (n - 1, n + 1):
             if 0 <= adj < self.total and adj not in self._cache:
                 threading.Thread(
-                    target=self.render_page, args=(adj,), daemon=True
+                    target=self._prefetch_one, args=(adj,), daemon=True
                 ).start()
+
+    def _prefetch_one(self, n: int) -> None:
+        try:
+            self.render_page(n)
+        except Exception as e:
+            log.debug("Prefetch da página %d falhou (ignorado): %s", n, e)
 
     def get_toc(self) -> list[tuple[int, str, int]]:
         """
@@ -272,7 +309,8 @@ class PDFRenderer:
         """
         try:
             return [(item[0], item[1], item[2]) for item in self._doc.get_toc()]
-        except Exception:
+        except Exception as e:
+            log.warning("Falha ao ler sumário do PDF: %s", e)
             return []
 
     def close(self):

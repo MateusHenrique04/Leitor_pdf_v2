@@ -1,7 +1,13 @@
-customtkinter
-pymupdf
-pillow
-edge-tts
-pygame
-langdetect
-beautifulsoup4
+# Dependências de runtime do Lector.
+# Versões mínimas testadas — customtkinter, pymupdf e edge-tts em
+# particular têm mudanças de API entre versões menores, então evite
+# fixar só o nome do pacote sem piso de versão (risco de build
+# não-reprodutível — ver auditoria de código).
+customtkinter>=5.2.2
+pymupdf>=1.24.0
+pillow>=10.3.0
+edge-tts>=6.1.9
+pygame>=2.5.2
+langdetect>=1.0.9
+beautifulsoup4>=4.12.3
+requests>=2.31.0
