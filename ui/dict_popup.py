@@ -70,7 +70,10 @@ class DictPopupMixin:
                      font=FONTS["body_small"], bg=C["panel_alt2"], fg=C["text_dim"],
                      padx=12, pady=4, justify="left").pack()
         elif result:
-            lang_label = {"pt-BR": "🇧🇷 PT", "en": "🇬🇧 EN", "es": "🇪🇸 ES"}
+            # Texto simples em vez de emoji de bandeira: bandeiras (sequências
+            # de "regional indicator") não renderizam de forma confiável no
+            # Tkinter no Windows — apareciam como pontos quebrados.
+            lang_label = {"pt-BR": "PT-BR", "en": "EN", "es": "ES"}
             lang_tag = lang_label.get(result["lang"], result["lang"])
 
             # Header

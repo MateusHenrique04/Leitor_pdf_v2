@@ -154,6 +154,12 @@ class ViewerMixin:
 
         self.current_page = n
         self._pan_x = self._pan_y = 0   # reseta pan ao mudar de página
+        # Com zoom > 100% (padrão), centralizar verticalmente corta o topo
+        # da página — onde o texto normalmente começa — deixando a tela
+        # com aparência de "página em branco" até o auto-scroll da leitura
+        # alcançar o texto. Pede pro próximo _draw_image ancorar no topo
+        # em vez de centralizar (só na primeira renderização da página).
+        self._pan_pending_top = True
         self._ephemeral_highlights = []  # limpa grifo da frase anterior
         self._eph_y_cursor = 0.0         # reseta cursor de posição sequencial
         lib.save_position(self.current_path, n, self.current_chunk_idx)
@@ -226,6 +232,14 @@ class ViewerMixin:
         scale      = base_scale * self._zoom
         nw         = int(iw * scale)
         nh         = int(ih * scale)
+
+        # Primeira renderização de uma página recém-aberta: ancora no topo
+        # em vez de centralizar verticalmente (ver _show_page). Sem isso,
+        # com o zoom padrão > 100%, o topo da página — onde o texto
+        # normalmente começa — fica cortado e a tela parece "em branco".
+        if self._pan_pending_top:
+            self._pan_y = max(0, (nh - ch) // 2)
+            self._pan_pending_top = False
 
         # Limita pan: não deixa imagem sair completamente da tela
         max_px = max(0, (nw - cw) // 2 + nw // 4)

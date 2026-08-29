@@ -147,6 +147,7 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
         self._pan_x      = 0            # offset de pan em pixels (imagem renderizada)
         self._pan_y      = 0
         self._pan_start  = None         # (x, y) do clique para arrastar
+        self._pan_pending_top = False   # True logo após abrir/trocar de página — ver _show_page
         self._cur_img    = None         # PIL Image da página atual (para redesenhar)
         
         self._lib_tab_var = ctk.StringVar(value="Lendo")
