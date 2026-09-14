@@ -99,6 +99,11 @@ tests/                # testes automatizados (pytest)
 Para instruções detalhadas de onde editar cada tipo de mudança, veja
 [`ADICIONAR_FUNCIONALIDADE.md`](ADICIONAR_FUNCIONALIDADE.md).
 
+Para arquitetura, fluxos internos (loop de leitura, busca de texto no PDF,
+zoom/pan, cascata do dicionário), formatos dos arquivos JSON de estado e
+decisões de design, veja
+[`DOCUMENTACAO_TECNICA.md`](DOCUMENTACAO_TECNICA.md).
+
 ## Licença
 
 [MIT](LICENSE).
