@@ -169,18 +169,33 @@ class ViewerMixin:
         self._page_lbl.configure(text=f"PÁG. {n + 1} / {self.total_pages}")
 
         # Renderiza em thread separada para não travar a UI
-        threading.Thread(target=self._render_and_draw, args=(n,), daemon=True).start()
+        threading.Thread(
+            target=self._render_and_draw, args=(n, self.renderer), daemon=True,
+        ).start()
 
-    def _render_and_draw(self, n: int):
-        """Roda em background — renderiza a imagem e agenda o draw na UI."""
+    def _render_and_draw(self, n: int, renderer):
+        """Roda em background — renderiza a imagem e agenda o draw na UI.
+
+        `renderer` é o renderer vigente no momento em que a renderização
+        foi pedida (não `self.renderer`, que pode já ter sido trocado se o
+        usuário virou de página ou de livro rápido — ver _draw_image_if_current).
+        """
         try:
-            img = self.renderer.render_page(n)
+            img = renderer.render_page(n)
             if self._alive:
-                self.after(0, lambda i=img: self._draw_image(i))
+                self.after(0, lambda i=img: self._draw_image_if_current(n, renderer, i))
             # Pré-renderiza páginas adjacentes em background
-            self.renderer.prefetch(n)
+            renderer.prefetch(n)
         except Exception as e:
             log.error(f"Erro ao renderizar página {n}: {e}")
+
+    def _draw_image_if_current(self, n: int, renderer, img: Image.Image):
+        """Só desenha se, no momento em que o callback roda na UI thread, a
+        imagem ainda corresponder à página/livro atuais — evita que uma
+        renderização lenta de uma página antiga seja desenhada depois da
+        imagem da página atual (virar páginas rápido)."""
+        if self._alive and n == self.current_page and renderer is self.renderer:
+            self._draw_image(img)
 
     def _hex_to_rgb(self, hex_color: str) -> tuple[int, int, int]:
         h = hex_color.lstrip("#")
@@ -405,7 +420,7 @@ class ViewerMixin:
         if self.renderer and 0 <= self.current_page < self.total_pages:
             threading.Thread(
                 target=self._render_and_draw,
-                args=(self.current_page,),
+                args=(self.current_page, self.renderer),
                 daemon=True,
             ).start()
 
@@ -492,7 +507,9 @@ class ViewerMixin:
             self.current_page = page
             self._prog_var.set(page + 1)
             self._page_lbl.configure(text=f"PÁG. {page + 1} / {self.total_pages}")
-            threading.Thread(target=self._render_and_draw, args=(page,), daemon=True).start()
+            threading.Thread(
+                target=self._render_and_draw, args=(page, self.renderer), daemon=True,
+            ).start()
         # Destaca todos os resultados da página atual; o resultado corrente
         # (identificado por identidade do objeto, não por índice — a versão
         # anterior sempre pintava o primeiro da lista, nunca o realmente
