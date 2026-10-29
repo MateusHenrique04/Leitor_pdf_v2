@@ -186,6 +186,16 @@ livros grandes — o `__init__` varre **todas** as páginas do documento para
 detectar cabeçalhos/rodapés repetidos (por isso `ui/sidebar.py` sempre cria
 o renderer numa `threading.Thread`).
 
+**Thread-safe desde a auditoria de concorrência**: PyMuPDF não é thread-safe,
+mas `PDFRenderer` é acessado pela UI, pelo prefetch, pela busca em todas as
+páginas e pelo loop de leitura ao mesmo tempo. Um `threading.RLock` protege
+todo acesso a `_doc`/`_cache`; a conversão de pixmap→`PIL.Image` em
+`render_page` e o casamento de palavras em `search_text` rodam fora do lock
+(só a parte que toca o documento PyMuPDF precisa dele). `close()` marca um
+flag `_closed`; chamadas depois disso retornam vazio em vez de lançar —
+threads de prefetch que ainda estejam em voo quando o livro é trocado não
+geram log de erro.
+
 | Membro | Descrição |
 |---|---|
 | `PDFOpenError` | Exceção com mensagem já segura para exibir ao usuário (arquivo corrompido, protegido por senha, sem páginas, caminho inexistente). |
@@ -193,10 +203,11 @@ o renderer numa `threading.Thread`).
 | `render_page(n) -> PIL.Image` | Rasteriza a página `n` (0-indexed) em `PDF_RENDER_DPI` (config, padrão 100). Cache **LRU real** de até 10 páginas (`OrderedDict` + `move_to_end`/`popitem(last=False)`). |
 | `text_for_page(n) -> str` | Texto normalizado (NFKC) para o TTS: remove linhas iguais ao cabeçalho/rodapé detectado, corrige hifenização de fim de linha (`pala-\nvra` → `palavra`), remove números de página isolados, colapsa espaços/quebras. |
 | `search_text(n, text) -> list[dict]` | Ver [§9.3](#93-busca-de-texto-e-grifo-automático-search_text) — heurística de 4 etapas para localizar um trecho na página e retornar bboxes em pontos PDF. |
+| `text_in_rect(n, x0, y0, x1, y1) -> str` | Texto contido num retângulo (pontos PDF) — usado para exportar o texto sob um grifo sem a UI acessar `_doc` diretamente. |
 | `word_at(n, pdf_x, pdf_y) -> str \| None` | Palavra sob um ponto (usado no clique do dicionário). |
 | `prefetch(n)` | Dispara threads daemon para pré-renderizar `n-1`/`n+1` (esconde a latência de troca de página). |
 | `get_toc() -> list[(level, title, page)]` | Sumário do PDF (bookmarks nativos); `[]` se ausente. |
-| `close()` | Fecha o documento e limpa o cache. |
+| `close()` | Fecha o documento e limpa o cache (idempotente). |
 
 ### 6.2 `core/dictionary.py` — `lookup()`
 
@@ -321,7 +332,8 @@ Lista append-only, uma sessão por entrada:
 {
   "/caminho/livro.pdf": {
     "3": [
-      {"x0": 72.5, "y0": 100.2, "x1": 400.1, "y1": 115.8,
+      {"id": "a1b2c3d4e5f6...", "x0": 72.5, "y0": 100.2,
+       "x1": 400.1, "y1": 115.8,
        "color": "#FFDD00", "opacity": 0.35}
     ]
   }
@@ -329,8 +341,13 @@ Lista append-only, uma sessão por entrada:
 ```
 
 Coordenadas em **pontos PDF** (não pixels de tela — independentes de
-zoom/DPI). `add()` deduplica retângulos quase idênticos (margem de 1pt).
-Toda operação que modifica grifos (`add`, `delete`, `clear_page`,
+zoom/DPI). `add()` deduplica retângulos quase idênticos (margem de 1pt) e
+dá um `id` único (`uuid4().hex`) a cada grifo novo — `delete()` identifica
+pelo `id`, não pelo índice na lista, para não apagar o grifo errado se a
+ordem mudar entre desenhar e apagar. Um `highlights.json` de uma versão
+anterior sem `id` é migrado automaticamente na primeira leitura (cada grifo
+sem `id` recebe um novo e o arquivo é salvo de volta — nenhum dado é
+perdido). Toda operação que modifica grifos (`add`, `delete`, `clear_page`,
 `clear_book`) persiste **imediatamente** (`save_to_disk()` interno) — grifos
 não dependem mais de fechamento normal do app para não se perderem num
 crash.
@@ -359,7 +376,8 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin,
           HighlightsMixin, DictPopupMixin, TocMixin, FocusMixin, ctk.CTk):
 ```
 
-Essa reorganização (documentada em [`implementation_plan.md`](implementation_plan.md))
+Essa reorganização (documentada em
+[`docs/historico/implementation_plan.md`](docs/historico/implementation_plan.md))
 separou o antigo `app.py` monolítico de 2.271 linhas sem alterar
 comportamento — cada mixin assume que `self` tem os atributos que `App.__init__`
 inicializa (ex.: `self.renderer`, `self._zoom`, `self.player`), então os
@@ -388,7 +406,7 @@ mesma lógica de bind de `<Button-1>`/`<Enter>`/`<Leave>`.
 ```
 usuário clica em "Abrir PDF" / livro da biblioteca
   → SidebarMixin._load_book(path)
-      · cancela leitura em andamento (_stop.set(), player.stop())
+      · cancela leitura em andamento (_stop_read_loop(), player.stop())
       · fecha renderer anterior; limpa canvas; mostra "Abrindo…"
       · dispara threading.Thread(_open_book_bg, args=(path,))
   → [thread background] _open_book_bg
@@ -397,7 +415,7 @@ usuário clica em "Abrir PDF" / livro da biblioteca
   → [UI thread] _on_book_opened
       · restaura last_page/last_chunk_idx de library.json
       · _show_page(current_page)
-      · threading.Thread(asyncio.run(self._read_loop()))    # nova thread p/ o loop de leitura
+      · _start_read_loop()    # nova geração + nova thread p/ o loop de leitura
 ```
 
 Ponto crítico documentado no próprio código: a exceção `e` de um
@@ -413,7 +431,10 @@ comunicação com Tk sempre via `self.after(0, ...)`). Pseudocódigo do fluxo
 por página:
 
 1. Extrai texto da página (`renderer.text_for_page`), divide em frases via
-   regex `(?<=[.!?])\s+|\n`.
+   `core.text.split_sentences` (ignora abreviações comuns, decimais e
+   reticências usadas como pausa — a mesma função é usada por
+   `_get_current_chunks`, então o loop e a navegação por frase nunca veem
+   listas diferentes).
 2. Detecta idioma da página (primeiros 500 chars) para alimentar o
    dicionário.
 3. Para cada frase (chunk), a partir de `current_chunk_idx`:
@@ -432,11 +453,17 @@ por página:
      (`_show_transient_status`) e segue para a próxima frase.
 4. Ao esgotar as frases da página, avança para `current_page + 1`; se for a
    última página, marca o livro como lido (`lib.mark_finished`).
-5. O loop inteiro observa `self._stop` (um `threading.Event`) — qualquer
+5. O loop observa um **token de geração** (`core.generation.GenerationGuard`,
+   via `self._read_gen`), não um `threading.Event` compartilhado. Qualquer
    ação do usuário (próxima/página anterior, seek, TOC) chama
-   `_restart_loop()`, que seta `_stop`, para o player, e — depois de um
-   pequeno delay de segurança contra *race condition* do pygame — dispara um
-   novo loop a partir da posição atualizada.
+   `_restart_loop()` → `_start_read_loop()`, que pega um novo token e
+   dispara a nova thread **imediatamente** — sem delay de espera. A thread
+   antiga confere o token antes de cada escrita de estado e antes de
+   `player.play`; se não for mais a geração atual, simplesmente para, mesmo
+   que estivesse bloqueada num `await` de rede do TTS no momento da troca
+   (era exatamente esse caso que um `Event` reutilizado não cobria —
+   `set()`+`clear()` tinha uma janela em que a thread antiga nunca via o
+   `set()` e voltava a tocar junto com a nova).
 
 ### 9.3 Busca de texto e grifo automático (`search_text`)
 
@@ -539,7 +566,30 @@ thread do Tkinter:
 | `asyncio` dentro de uma thread dedicada | `_read_loop` (`asyncio.run(...)` numa thread própria) | `edge-tts` é uma API assíncrona nativa; permite pré-gerar o próximo áudio (`asyncio.create_task`) enquanto o atual toca |
 | `self.after(0, callback)` | Toda vez que uma thread de background precisa tocar em um widget Tkinter | Tkinter não é thread-safe — `after(0, ...)` reagenda o callback para rodar na UI thread |
 
-Dois guardas explícitos contra corrida:
+Guardas explícitos contra corrida (resultado da auditoria de concorrência):
+
+- **`core.generation.GenerationGuard`** (`self._read_gen`) — cada execução
+  do `_read_loop` recebe um token ao iniciar (`_start_read_loop`) e confere
+  esse token antes de escrever `current_page`/`current_chunk_idx` e antes de
+  `player.play`. Substitui um `threading.Event` compartilhado, que tinha uma
+  janela de corrida: se a thread antiga estivesse bloqueada num `await` de
+  rede do TTS no momento do `clear()`, ela nunca via o `set()` e voltava a
+  tocar junto com a nova (vozes sobrepostas). Testado isoladamente em
+  `tests/test_generation.py`, sem depender de Tk.
+- **`core.pdf_renderer.PDFRenderer._lock`** (`threading.RLock`) — PyMuPDF não
+  é thread-safe, mas o renderer é acessado pela UI, pelo prefetch, pela
+  busca em todas as páginas e pelo loop de leitura ao mesmo tempo. Protege
+  todo acesso a `_doc`/`_cache`; testado com 8 threads concorrentes em
+  `tests/test_pdf_renderer.py::test_concurrent_access_does_not_raise`.
+- **`core.dictionary._cache_lock`** — o cache de definições é alterado por
+  uma thread por clique de palavra; protegido por `threading.Lock` e
+  limitado a 500 entradas (política LRU) para não crescer sem limite numa
+  sessão longa.
+- **`self._render_and_draw` com o par `(n, renderer)`** — ao virar páginas
+  rápido, uma renderização lenta podia terminar depois e desenhar a imagem
+  errada por cima da página atual. O número da página e o renderer vigentes
+  no momento do pedido viajam com a chamada; `_draw_image_if_current` confere
+  os dois já na UI thread, exatamente antes de desenhar.
 - `self._state_lock` (`threading.Lock`) protege `current_chunk_idx`, lido
   tanto pela UI (para salvar posição) quanto escrito pelo `_read_loop`.
 - `self._alive` (bool) é setado para `False` em `_quit()` **antes** de
@@ -547,6 +597,15 @@ Dois guardas explícitos contra corrida:
   background checa `self._alive` antes de tocar em widgets, evitando
   `TclError` de "widget já destruído" quando o app fecha com threads ainda
   em voo.
+- `data.highlights`: grifos são identificados por `id` (uuid4), não pelo
+  índice na lista — apagar pelo índice dependia da ordem da lista continuar
+  igual entre desenhar e apagar.
+
+`_highlight_ephemeral` e `_precompute_word_bboxes` são chamadas direto da
+thread de background do `_read_loop` — revisado e confirmado que nenhuma das
+duas toca em widget Tk diretamente: só calculam dados ou escrevem numa lista
+Python simples (`_ephemeral_highlights`) e agendam o redesenho real via
+`self.after(0, ...)`.
 
 ## 11. Configuração (`config.py`)
 
@@ -597,38 +656,62 @@ tests/
 │                          # via pymupdf (sample_pdf_path), PDF corrompido
 │                          # (corrupted_pdf_path) — não depende de binário
 │                          # versionado no repo
-├── test_pdf_renderer.py  # abertura válida/corrompida/inexistente,
-│                          # extração de texto, search_text (frase completa,
-│                          # sem match, página fora do range), word_at,
-│                          # cache LRU, TOC
+├── test_pdf_renderer.py  # abertura válida/corrompida/inexistente, extração
+│                          # de texto (incl. remoção de cabeçalho/rodapé
+│                          # repetido), search_text nas 4 etapas (frase
+│                          # completa, âncora por início/fim, fallback por
+│                          # palavras únicas) + sem match, word_at,
+│                          # text_in_rect, cache LRU, TOC, acesso concorrente
+│                          # de 8 threads
+├── test_text.py          # split_sentences: abreviações PT/EN/ES, decimais,
+│                          # reticências como pausa, texto vazio, quebras de
+│                          # linha
+├── test_generation.py    # GenerationGuard — token nunca "revive" depois
+│                          # de uma nova geração, mesmo liberado tarde
+├── test_player.py        # offset de posição não dobra após pause/unpause
+│                          # (pygame.mixer dublado — não depende de áudio
+│                          # real nem do binário do pygame)
+├── test_highlights.py    # add/duplicata, apagar por id (com lista
+│                          # reordenada), clear_page, clear_book, migração
+│                          # de highlights.json antigo sem "id",
+│                          # persistência após cada alteração
+├── test_library.py       # progresso por livro, total de páginas,
+│                          # lido/não lido, persistência
+├── test_prefs.py         # preferências, defaults, compatibilidade com
+│                          # chaves antigas desconhecidas, persistência
 ├── test_dictionary.py    # _clean_word, _normalize_slug, cache positivo
 │                          # (sem TTL) vs. negativo (com TTL), distinção
 │                          # erro-de-rede vs. não-encontrado, parsing do
-│                          # Free Dictionary API
+│                          # Free Dictionary API, limite de tamanho do
+│                          # cache, lookups concorrentes
 └── test_jsonio.py        # roundtrip save/load, atomicidade (sem .tmp
                            # órfão), backup de arquivo corrompido
 ```
 
-Cobertura é deliberadamente focada em `core/` e `data/_jsonio.py` — os
-módulos sem dependência de Tk e com a lógica mais arriscada
-(`search_text` tem 4 estratégias heurísticas; o cache de dicionário tem
-semântica de TTL assimétrica). `ui/` não tem testes automatizados —
-verificação é manual, seguindo o checklist do
-[`implementation_plan.md`](implementation_plan.md#verificação).
+Cobertura é deliberadamente focada em `core/` e `data/` — os módulos sem
+dependência de Tk e com a lógica mais arriscada (`search_text` tem 4
+estratégias heurísticas; o cache de dicionário tem semântica de TTL
+assimétrica; vários módulos são acessados de múltiplas threads). `ui/` não
+tem testes automatizados — verificação é manual, seguindo o checklist do
+[`docs/historico/implementation_plan.md`](docs/historico/implementation_plan.md#verificação).
 
 ```bash
-pytest              # roda tudo
-pytest -q            # saída enxuta (usada no CI)
-ruff check .          # lint (E, F, I, B, UP — ver pyproject.toml)
+pytest                           # roda tudo
+pytest -q                         # saída enxuta
+pytest --cov=core --cov=data -q   # com resumo de cobertura (usada no CI)
+ruff check .                      # lint (E, F, I, B, UP — ver pyproject.toml)
 ```
+
+`pytest-cov` (em `requirements-dev.txt`) mostra o resumo de cobertura por
+arquivo no log; não há um mínimo exigido ainda.
 
 ## 14. CI/CD
 
 `.github/workflows/ci.yml` roda em `windows-latest` (a plataforma alvo
 principal) a cada push/PR em `main`: instala `requirements.txt` +
-`requirements-dev.txt`, roda `ruff check .` e `pytest -q`. Não há deploy
-automatizado — o `.exe` é gerado manualmente via PyInstaller quando
-necessário.
+`requirements-dev.txt`, roda `ruff check .` e
+`pytest --cov=core --cov=data -q`. Não há deploy automatizado — o `.exe` é
+gerado manualmente via PyInstaller quando necessário.
 
 ## 15. Build e distribuição (PyInstaller)
 
@@ -671,11 +754,23 @@ nunca devem ser commitados.
 - **Sem testes automatizados para `ui/`** — qualquer regressão de
   comportamento visual/interação só é pega manualmente.
 - **Cache de dicionário não persiste entre execuções** — reinicia a cada
-  abertura do app (é só em memória, `_dict_cache` a nível de módulo).
+  abertura do app (é só em memória, protegido por lock e limitado a 500
+  entradas — ver [§10](#10-concorrência) — mas ainda só em memória;
+  persistir em disco é uma proposta aberta, ver
+  `docs/propostas/04-cache-dicionario-em-disco.md`).
 - **`search_text` é heurístico** — em PDFs com layout muito irregular
   (colunas complexas, tabelas, texto rotacionado), o grifo automático pode
   falhar em localizar a frase exata (o loop de leitura continua tocando o
-  áudio normalmente; só o destaque visual pode ficar impreciso).
+  áudio normalmente; só o destaque visual pode ficar impreciso). Uma
+  alternativa sem busca textual está proposta em
+  `docs/propostas/01-grifo-sincronizado-sem-busca-textual.md`.
+- **Biblioteca identifica livros pelo caminho do arquivo** — mover/renomear
+  o PDF perde progresso e grifos salvos. Alternativa (identificar por hash
+  do conteúdo) proposta em `docs/propostas/02-chave-biblioteca-por-hash.md`.
+- **Sem pré-geração de áudio multi-frase nem retry em falha de TTS** — já
+  pré-gera 1 frase adiante (ver [§9.2](#92-loop-de-leitura-controlsmixin_read_loop-assíncrono));
+  ampliar isso e adicionar retry está proposto em
+  `docs/propostas/03-pre-geracao-de-audio.md`.
 - **Um único processo, um único documento aberto por vez** — não há suporte
   a múltiplas janelas/abas.
 - **`.venv/`, `build/`, `dist/`, `__pycache__/` presentes no diretório de

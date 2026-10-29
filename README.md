@@ -6,6 +6,10 @@ interativo (clique numa palavra para ver a definição em PT/EN/ES), grifos
 persistentes, biblioteca de livros com progresso salvo, sumário e busca de
 texto.
 
+## Por que este projeto existe
+
+<!-- preencher -->
+
 ## Funcionalidades
 
 - **Leitura em voz alta (TTS)** via [edge-tts](https://github.com/rany2/edge-tts),
@@ -74,6 +78,9 @@ pip install -r requirements-dev.txt
 # Testes
 pytest
 
+# Testes com resumo de cobertura (core/ e data/)
+pytest --cov=core --cov=data
+
 # Lint
 ruff check .
 ```
@@ -88,9 +95,11 @@ main.py              # ponto de entrada — só inicializa App()
 config.py            # cores, fontes, vozes, paths — única fonte de verdade
 core/                 # lógica de negócio, sem dependência de UI
   pdf_renderer.py     # abrir/renderizar PDF, extrair texto, buscar trechos (PyMuPDF)
+  text.py             # divisão de texto em frases para o TTS
   dictionary.py       # busca de definições (scraping + APIs)
   tts.py              # geração de áudio (edge-tts)
   player.py           # reprodução de áudio (pygame)
+  generation.py       # cancelamento de trabalho obsoleto entre threads
 data/                 # persistência em JSON (biblioteca, histórico, grifos, preferências)
 ui/                   # interface (CustomTkinter/Tkinter), via mixins compostos em App
 tests/                # testes automatizados (pytest)

@@ -1,3 +1,11 @@
+> [!NOTE]
+> **Concluído.** Este plano já foi executado — `ui/app.py` foi dividido
+> nos mixins descritos abaixo (ver `ui/sidebar.py`, `ui/viewer.py`,
+> `ui/controls.py`, `ui/right_panel.py`, `ui/highlights_mixin.py`,
+> `ui/toc_window.py`, `ui/dict_popup.py`, `ui/focus_dialog.py`). Mantido
+> aqui só como registro histórico da decisão — para a estrutura atual,
+> ver `ADICIONAR_FUNCIONALIDADE.md`.
+
 # Separação do `ui/app.py` em Módulos
 
 O `app.py` tem **2.271 linhas** e 94 KB. Embora já siga a regra de "UI orquestra, lógica em `core/`", a classe `App` acumula muitas responsabilidades de UI que podem ser isoladas em arquivos menores, facilitando edição e manutenção.
