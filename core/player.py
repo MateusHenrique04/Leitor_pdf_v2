@@ -52,9 +52,12 @@ class Player:
             pygame.mixer.music.pause()
 
     def pause(self):
-        raw_ms = pygame.mixer.music.get_pos()
-        if raw_ms >= 0:
-            self._offset_seconds += raw_ms / 1000.0
+        # Não acumula get_pos() em _offset_seconds aqui: o pygame mantém a
+        # posição congelada enquanto pausado (não reseta no pause/unpause),
+        # então get_pos() já soma esse mesmo valor de novo — acumular aqui
+        # dobrava a posição reportada a cada pausa (bug verificado com
+        # tests/test_player.py). _offset_seconds só precisa ser zerado em
+        # play().
         pygame.mixer.music.pause()
         self._paused = True
 
