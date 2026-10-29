@@ -88,3 +88,49 @@ def test_migrates_old_file_without_ids(tmp_path):
     # Nenhum dado original foi perdido.
     assert saved["book.pdf"]["1"][0]["x0"] == 0
     assert saved["book.pdf"]["1"][1]["x1"] == 30
+
+
+def test_clear_page_removes_only_that_page():
+    highlights.add("book.pdf", 1, 0, 0, 10, 10)
+    highlights.add("book.pdf", 2, 0, 0, 10, 10)
+    highlights.clear_page("book.pdf", 1)
+    assert highlights.get("book.pdf", 1) == []
+    assert len(highlights.get("book.pdf", 2)) == 1
+
+
+def test_clear_page_on_book_without_highlights_is_a_noop():
+    highlights.clear_page("book-sem-grifos.pdf", 1)   # não deve lançar
+
+
+def test_clear_book_removes_all_pages():
+    highlights.add("book.pdf", 1, 0, 0, 10, 10)
+    highlights.add("book.pdf", 2, 0, 0, 10, 10)
+    highlights.add("outro.pdf", 1, 0, 0, 10, 10)
+    highlights.clear_book("book.pdf")
+    assert highlights.all_for_book("book.pdf") == {}
+    assert len(highlights.get("outro.pdf", 1)) == 1
+
+
+def test_persists_to_disk_after_every_change():
+    """Cada função que altera grifos persiste imediatamente — grifos não
+    dependem do usuário fechar o app normalmente para não serem perdidos."""
+    hid = highlights.add("book.pdf", 1, 0, 0, 10, 10)
+    saved = json.loads(config.HIGHLIGHTS_FILE.read_text(encoding="utf-8"))
+    assert saved["book.pdf"]["1"][0]["id"] == hid
+
+    highlights.add("book.pdf", 1, 100, 100, 110, 110)
+    saved = json.loads(config.HIGHLIGHTS_FILE.read_text(encoding="utf-8"))
+    assert len(saved["book.pdf"]["1"]) == 2
+
+    highlights.delete("book.pdf", 1, hid)
+    saved = json.loads(config.HIGHLIGHTS_FILE.read_text(encoding="utf-8"))
+    assert len(saved["book.pdf"]["1"]) == 1
+
+    highlights.clear_page("book.pdf", 1)
+    saved = json.loads(config.HIGHLIGHTS_FILE.read_text(encoding="utf-8"))
+    assert saved["book.pdf"].get("1", []) == []
+
+    highlights.add("book.pdf", 2, 0, 0, 10, 10)
+    highlights.clear_book("book.pdf")
+    saved = json.loads(config.HIGHLIGHTS_FILE.read_text(encoding="utf-8"))
+    assert "book.pdf" not in saved
