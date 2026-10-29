@@ -3,6 +3,8 @@ Testes de core/pdf_renderer.py — o módulo com a lógica mais arriscada do
 projeto (search_text tem 4 estratégias de matching heurístico e não tinha
 nenhum teste antes desta auditoria).
 """
+import threading
+
 import pytest
 
 from core.pdf_renderer import PDFOpenError, PDFRenderer
@@ -93,4 +95,33 @@ def test_get_toc_returns_entries(sample_pdf_path):
     r = PDFRenderer(sample_pdf_path)
     toc = r.get_toc()
     assert isinstance(toc, list)
+    r.close()
+
+
+def test_concurrent_access_does_not_raise(sample_pdf_path):
+    """PyMuPDF não é thread-safe — render_page, text_for_page e search_text
+    rodam de várias threads ao mesmo tempo (UI, prefetch, busca e loop de
+    leitura fazem isso na prática) e nenhuma delas deve lançar exceção
+    nem travar, graças ao RLock em torno de _doc/_cache."""
+    r = PDFRenderer(sample_pdf_path)
+    errors: list[Exception] = []
+
+    def worker(i: int):
+        try:
+            for _ in range(20):
+                page = i % r.total
+                r.render_page(page)
+                r.text_for_page(page)
+                r.search_text(page, "gato")
+                r.word_at(page, 80, 100)
+        except Exception as e:  # pragma: no cover - só deve rodar se falhar
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors
     r.close()

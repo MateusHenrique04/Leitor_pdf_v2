@@ -16,6 +16,7 @@ thread de background, nunca na thread principal.
 
 import logging
 import re
+import threading
 import unicodedata
 from collections import OrderedDict, defaultdict
 
@@ -34,6 +35,11 @@ class PDFOpenError(Exception):
 
 class PDFRenderer:
     def __init__(self, filepath: str):
+        # PyMuPDF não é thread-safe: a UI, as threads de prefetch, a busca
+        # em todas as páginas e o loop de leitura acessam _doc e _cache
+        # concorrentemente. Este lock protege todo acesso a ambos.
+        self._lock = threading.RLock()
+        self._closed = False
         try:
             self._doc = fitz.open(filepath)
         except Exception as e:
@@ -54,35 +60,49 @@ class PDFRenderer:
         self._cache: OrderedDict[int, Image.Image] = OrderedDict()   # LRU de páginas renderizadas
 
         # Detecta cabeçalhos/rodapés repetidos (≥30% das páginas) para remover do TTS
+        # (__init__ roda antes de qualquer outra thread conhecer este
+        # renderer, então o lock aqui é só por consistência com os demais
+        # métodos, não por uma race real.)
         hdr: dict[str, int] = {}
         ftr: dict[str, int] = {}
-        for page in self._doc:
-            lines = [ln.strip() for ln in page.get_text().split("\n") if ln.strip()]
-            if lines:
-                hdr[lines[0]]  = hdr.get(lines[0], 0) + 1
-            if len(lines) > 1:
-                ftr[lines[-1]] = ftr.get(lines[-1], 0) + 1
+        with self._lock:
+            for page in self._doc:
+                lines = [ln.strip() for ln in page.get_text().split("\n") if ln.strip()]
+                if lines:
+                    hdr[lines[0]]  = hdr.get(lines[0], 0) + 1
+                if len(lines) > 1:
+                    ftr[lines[-1]] = ftr.get(lines[-1], 0) + 1
 
         thr = max(3, int(self.total * 0.30))
         self._skip = {k for k, v in {**hdr, **ftr}.items() if v >= thr}
 
     def render_page(self, n: int) -> Image.Image:
         """Renderiza a página n (0-indexed) e retorna uma imagem PIL."""
-        if n in self._cache:
-            self._cache.move_to_end(n)   # LRU: marca como usada recentemente
-            return self._cache[n]
-        mat  = fitz.Matrix(PDF_RENDER_DPI / 72, PDF_RENDER_DPI / 72)
-        pix  = self._doc[n].get_pixmap(matrix=mat, alpha=False)
-        img  = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        # Limita cache a 10 páginas para não consumir muita RAM (política LRU real)
-        if len(self._cache) >= 10:
-            self._cache.popitem(last=False)
-        self._cache[n] = img
+        with self._lock:
+            if self._closed:
+                raise ValueError("PDFRenderer já foi fechado")
+            if n in self._cache:
+                self._cache.move_to_end(n)   # LRU: marca como usada recentemente
+                return self._cache[n]
+            mat  = fitz.Matrix(PDF_RENDER_DPI / 72, PDF_RENDER_DPI / 72)
+            pix  = self._doc[n].get_pixmap(matrix=mat, alpha=False)
+            width, height, samples = pix.width, pix.height, pix.samples
+        # pix.samples já é uma cópia independente do documento — a conversão
+        # para PIL.Image não precisa do lock.
+        img = Image.frombytes("RGB", (width, height), samples)
+        with self._lock:
+            # Limita cache a 10 páginas para não consumir muita RAM (política LRU real)
+            if len(self._cache) >= 10:
+                self._cache.popitem(last=False)
+            self._cache[n] = img
         return img
 
     def text_for_page(self, n: int) -> str:
         """Retorna o texto limpo da página n (0-indexed) para o TTS."""
-        raw   = unicodedata.normalize("NFKC", self._doc[n].get_text())
+        with self._lock:
+            if self._closed:
+                return ""
+            raw = unicodedata.normalize("NFKC", self._doc[n].get_text())
         lines = [ln for ln in raw.split("\n") if ln.strip() not in self._skip]
         text  = "\n".join(lines)
         # Corrige hifenização de fim de linha
@@ -115,33 +135,41 @@ class PDFRenderer:
         """
         if not text.strip() or n < 0 or n >= self.total:
             return []
-        page = self._doc[n]
 
-        # ── Etapa 1: frase completa via search_for ───────────────────
-        # Tenta com quads=True para obter múltiplos retângulos em frases multi-linha
-        try:
-            quads = page.search_for(text.strip(), quads=True)
-            if quads:
-                rects = []
-                for q in quads:
-                    r = q.rect
-                    rects.append({"x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1})
-                return rects
-        except Exception as e:
-            log.debug("search_for(quads=True) falhou na página %d: %s", n, e)
+        # Todo o acesso a self._doc/page fica dentro do lock; a partir daqui
+        # (words_in_page já é uma lista Python independente) o casamento de
+        # palavras roda sem segurar o lock, mesmo sendo a parte mais lenta.
+        with self._lock:
+            if self._closed:
+                return []
+            page = self._doc[n]
 
-        # Fallback search_for sem quads
-        try:
-            matches = page.search_for(text.strip())
-        except Exception as e:
-            log.debug("search_for() falhou na página %d: %s", n, e)
-            matches = []
-        if matches:
-            return [{"x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1} for r in matches]
+            # ── Etapa 1: frase completa via search_for ───────────────
+            # Tenta com quads=True para múltiplos retângulos em frases multi-linha
+            try:
+                quads = page.search_for(text.strip(), quads=True)
+                if quads:
+                    rects = []
+                    for q in quads:
+                        r = q.rect
+                        rects.append({"x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1})
+                    return rects
+            except Exception as e:
+                log.debug("search_for(quads=True) falhou na página %d: %s", n, e)
 
-        # ── Monta estrutura de palavras por linha ────────────────────
-        # words_in_page: lista de (x0,y0,x1,y1,word,block_n,line_n,word_n)
-        words_in_page = page.get_text("words")
+            # Fallback search_for sem quads
+            try:
+                matches = page.search_for(text.strip())
+            except Exception as e:
+                log.debug("search_for() falhou na página %d: %s", n, e)
+                matches = []
+            if matches:
+                return [{"x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1} for r in matches]
+
+            # ── Monta estrutura de palavras por linha ─────────────────
+            # words_in_page: lista de (x0,y0,x1,y1,word,block_n,line_n,word_n)
+            words_in_page = page.get_text("words")
+
         if not words_in_page:
             return []
 
@@ -276,8 +304,11 @@ class PDFRenderer:
         """
         if n < 0 or n >= self.total:
             return None
-        page = self._doc[n]
-        for w in page.get_text("words"):
+        with self._lock:
+            if self._closed:
+                return None
+            words = self._doc[n].get_text("words")
+        for w in words:
             x0, y0, x1, y1, word = w[0], w[1], w[2], w[3], w[4]
             if x0 <= pdf_x <= x1 and y0 <= pdf_y <= y1:
                 return re.sub(r"[^\w\-']", "", word).strip() or None
@@ -288,14 +319,18 @@ class PDFRenderer:
         Pré-renderiza as páginas adjacentes a n em threads daemon.
         Chamado após renderizar a página atual para eliminar atraso na troca.
         """
-        import threading
-        for adj in (n - 1, n + 1):
-            if 0 <= adj < self.total and adj not in self._cache:
-                threading.Thread(
-                    target=self._prefetch_one, args=(adj,), daemon=True
-                ).start()
+        with self._lock:
+            pending = [adj for adj in (n - 1, n + 1)
+                       if 0 <= adj < self.total and adj not in self._cache]
+        for adj in pending:
+            threading.Thread(
+                target=self._prefetch_one, args=(adj,), daemon=True
+            ).start()
 
     def _prefetch_one(self, n: int) -> None:
+        # Documento pode já ter sido fechado (troca de livro) entre o
+        # agendamento do prefetch e esta thread rodar — falha silenciosa,
+        # sem log de erro barulhento, pois é esperado nesse caso.
         try:
             self.render_page(n)
         except Exception as e:
@@ -308,11 +343,19 @@ class PDFRenderer:
         Retorna [] se o PDF não tiver TOC.
         """
         try:
-            return [(item[0], item[1], item[2]) for item in self._doc.get_toc()]
+            with self._lock:
+                if self._closed:
+                    return []
+                toc = self._doc.get_toc()
+            return [(item[0], item[1], item[2]) for item in toc]
         except Exception as e:
             log.warning("Falha ao ler sumário do PDF: %s", e)
             return []
 
     def close(self):
-        self._doc.close()
-        self._cache.clear()
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._doc.close()
+            self._cache.clear()
