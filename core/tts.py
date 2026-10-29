@@ -29,7 +29,7 @@ async def speak(text: str, voice: str, speed_pct: int) -> tuple[bytes, list[dict
     rate = f"{speed_pct:+d}%"
     comm = edge_tts.Communicate(text, voice, rate=rate)
 
-    buf      = b""
+    buf      = bytearray()
     timings  = []          # [{word, start, end}]
 
     try:
@@ -60,4 +60,4 @@ async def speak(text: str, voice: str, speed_pct: int) -> tuple[bytes, list[dict
     if not buf:
         log.warning("TTS: áudio vazio retornado sem exceção para o trecho: %r", text[:60])
 
-    return buf, timings
+    return bytes(buf), timings

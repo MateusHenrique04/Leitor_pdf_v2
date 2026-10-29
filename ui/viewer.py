@@ -187,7 +187,7 @@ class ViewerMixin:
             # Pré-renderiza páginas adjacentes em background
             renderer.prefetch(n)
         except Exception as e:
-            log.error(f"Erro ao renderizar página {n}: {e}")
+            log.error("Erro ao renderizar página %d: %s", n, e)
 
     def _draw_image_if_current(self, n: int, renderer, img: Image.Image):
         """Só desenha se, no momento em que o callback roda na UI thread, a

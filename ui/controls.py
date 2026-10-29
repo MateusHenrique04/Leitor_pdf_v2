@@ -160,15 +160,9 @@ class ControlsMixin:
             if start_idx >= len(chunks):
                 start_idx = 0
 
-            async def get_audio(text_chunk):
-                try:
-                    audio, timings = await speak(text_chunk, self._voice, self._speed)
-                    return audio, timings
-                except Exception as e:
-                    log.error(f"TTS erro: {e}")
-                    return b"", []
-
-            next_audio_task = asyncio.create_task(get_audio(chunks[start_idx]))
+            # speak() nunca lança — já trata suas próprias falhas e retorna
+            # (b"", []) para o loop pular o trecho (ver core/tts.py).
+            next_audio_task = asyncio.create_task(speak(chunks[start_idx], self._voice, self._speed))
 
             for i in range(start_idx, len(chunks)):
                 if not self._is_current_gen(gen):
@@ -184,7 +178,9 @@ class ControlsMixin:
 
                 # Pré-gera o próximo chunk enquanto o atual toca
                 if i + 1 < len(chunks):
-                    next_audio_task = asyncio.create_task(get_audio(chunks[i + 1]))
+                    next_audio_task = asyncio.create_task(
+                        speak(chunks[i + 1], self._voice, self._speed)
+                    )
 
                 if not self._is_current_gen(gen):
                     break
@@ -380,4 +376,4 @@ class ControlsMixin:
             self._pan_y = max(-max_py, min(max_py, new_pan_y))
             self._redraw()
         except Exception as e:
-            log.debug(f"auto_scroll erro (ignorado): {e}")
+            log.debug("auto_scroll erro (ignorado): %s", e)
