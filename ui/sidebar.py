@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import threading
@@ -152,7 +151,7 @@ class SidebarMixin:
 
         # Se o livro removido estiver aberto, limpa a tela
         if self.current_path == path:
-            self._stop.set()
+            self._stop_read_loop()
             self.player.stop()
             if self.renderer:
                 self.renderer.close()
@@ -191,7 +190,7 @@ class SidebarMixin:
             self._focus_blocked_feedback()
             return
         # Para tudo que estava rodando
-        self._stop.set()
+        self._stop_read_loop()
         self.player.stop()
         if self.renderer:
             self.renderer.close()
@@ -262,12 +261,10 @@ class SidebarMixin:
         self._prog_var.set(self.current_page + 1)
         self._update_finished_btn()
 
-        self._stop.clear()
         self._show_page(self.current_page)
 
         # Inicia o loop de leitura
-        threading.Thread(target=lambda: asyncio.run(self._read_loop()),
-                         daemon=True).start()
+        self._start_read_loop()
 
     def _toggle_finished(self):
         if not self.current_path:

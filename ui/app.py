@@ -38,6 +38,7 @@ from config import (
     VOICES,
     C,
 )
+from core.generation import GenerationGuard
 from core.player import Player
 from ui.controls import ControlsMixin
 from ui.dict_popup import DictPopupMixin
@@ -108,7 +109,14 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
         self.current_page  = 0          # página sendo exibida (0-indexed)
         self.current_chunk_idx = 0      # índice da frase atual sendo lida
         self.total_pages   = 0
-        self._stop         = threading.Event()
+        # Token de geração do loop de leitura — cada _read_loop recebe o
+        # valor vigente no momento em que foi criado e só segue lendo/
+        # escrevendo estado enquanto ele continuar sendo o mais recente.
+        # Substitui um threading.Event compartilhado (ver auditoria de
+        # código: um Event reutilizado permitia duas leituras simultâneas
+        # quando a thread antiga estava bloqueada num await de rede no
+        # momento do clear()).
+        self._read_gen     = GenerationGuard()
         self._voice        = VOICES[self._pref_voice_name]
         self._speed        = SPEEDS[self._pref_speed_label]
         self._dragging     = False
@@ -272,7 +280,7 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
             if not ok:
                 return
         self._alive = False
-        self._stop.set()
+        self._stop_read_loop()
         self._save_session()
         highlights.save_to_disk()
         self.player.quit()

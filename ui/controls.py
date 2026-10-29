@@ -96,15 +96,37 @@ class ControlsMixin:
                 self._status_lbl.configure(text="")
         self.after(ms, _clear)
 
-    async def _read_loop(self):
+    def _is_current_gen(self, gen: int) -> bool:
+        """True enquanto `gen` ainda for a geração mais recente do loop de
+        leitura — usado por _read_loop para saber se foi invalidado."""
+        return self._read_gen.is_current(gen)
+
+    def _start_read_loop(self):
+        """Invalida qualquer _read_loop em execução (nova geração) e inicia
+        um novo a partir da página/frase correntes. Uma thread antiga nunca
+        mais escreve em current_page/current_chunk_idx nem chama
+        player.play depois de ver sua geração ficar velha."""
+        gen = self._read_gen.next()
+        threading.Thread(
+            target=lambda: asyncio.run(self._read_loop(gen)),
+            daemon=True,
+        ).start()
+
+    def _stop_read_loop(self):
+        """Invalida a geração atual sem iniciar uma nova (fechar livro/app)."""
+        self._read_gen.invalidate()
+
+    async def _read_loop(self, gen: int):
         """
         Para cada página a partir de current_page:
           1. Extrai texto
           2. Gera áudio via TTS
           3. Toca o áudio
           4. Avança para a próxima página
+
+        `gen` é o token de geração desta execução — ver _start_read_loop.
         """
-        while not self._stop.is_set():
+        while self._is_current_gen(gen):
             page = self.current_page
             if page >= self.total_pages:
                 break
@@ -144,10 +166,12 @@ class ControlsMixin:
             next_audio_task = asyncio.create_task(get_audio(chunks[start_idx]))
 
             for i in range(start_idx, len(chunks)):
-                if self._stop.is_set():
+                if not self._is_current_gen(gen):
                     break
 
                 with self._state_lock:
+                    if not self._read_gen.is_current(gen):
+                        break
                     self.current_chunk_idx = i
                 self._current_text = chunks[i]
 
@@ -157,7 +181,7 @@ class ControlsMixin:
                 if i + 1 < len(chunks):
                     next_audio_task = asyncio.create_task(get_audio(chunks[i + 1]))
 
-                if self._stop.is_set():
+                if not self._is_current_gen(gen):
                     break
                 if not audio:
                     self.after(0, lambda: self._show_transient_status(
@@ -172,13 +196,15 @@ class ControlsMixin:
                     chunks, i, timings, self.current_page
                 )
 
+                if not self._is_current_gen(gen):
+                    break
                 self.player.play(audio)
 
                 # Loop de reprodução — word-by-word se houver bboxes,
                 # senão mantém o grifo de chunk já aplicado acima
                 word_idx = -1
                 while (self.player.is_busy() or self.player.is_paused) \
-                      and not self._stop.is_set():
+                      and self._is_current_gen(gen):
                     await asyncio.sleep(0.03)
 
                     if self.player.is_paused or not word_bboxes:
@@ -206,10 +232,10 @@ class ControlsMixin:
                                 self.after(0, self._auto_scroll_to_highlight)
 
                 # Delay de segurança (race condition pygame)
-                if not self._stop.is_set():
+                if self._is_current_gen(gen):
                     await asyncio.sleep(0.15)
 
-            if not self._stop.is_set():
+            if self._is_current_gen(gen):
                 self.current_page += 1
                 self.current_chunk_idx = 0
                 if self.current_page >= self.total_pages and self.current_path:
@@ -218,20 +244,14 @@ class ControlsMixin:
                     self._refresh_lib()
 
     def _restart_loop(self):
-        """Para o loop atual e reinicia da página corrente."""
-        self._stop.set()
-        self.player.stop()
-        if self._alive:
-            self.after(250, self._do_restart)
-
-    def _do_restart(self):
+        """Para o loop atual e reinicia imediatamente da página/frase
+        correntes — cada chamada gera um novo token, então a thread antiga
+        (mesmo que ainda esteja bloqueada num await de rede) nunca mais
+        escreve estado nem toca áudio depois disso."""
         if not self._alive:
             return
-        self._stop.clear()
-        threading.Thread(
-            target=lambda: asyncio.run(self._read_loop()),
-            daemon=True,
-        ).start()
+        self.player.stop()
+        self._start_read_loop()
 
     def _toggle_play(self):
         if not self.renderer:
