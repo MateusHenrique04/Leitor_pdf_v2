@@ -331,7 +331,7 @@ class ControlsMixin:
     def _toggle_autoscroll(self):
         """Liga/desliga o scroll automático (preferência persistida)."""
         self._autoscroll_enabled = not self._autoscroll_enabled
-        prefs.set("autoscroll", self._autoscroll_enabled)
+        prefs.set_value("autoscroll", self._autoscroll_enabled)
         if self._autoscroll_enabled:
             self._scroll_btn.configure(text="⇕ auto-scroll  ON",  fg=C["success"])
         else:

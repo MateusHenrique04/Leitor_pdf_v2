@@ -50,7 +50,7 @@ class RightPanelMixin:
             name = voice_names[idx]
             self._voice_lbl.configure(text=name)
             self._voice = VOICES[name]
-            prefs.set("voice", name)
+            prefs.set_value("voice", name)
             self._voice_popup.pack_forget()
             self._voice_popup_open = False
 
@@ -101,7 +101,7 @@ class RightPanelMixin:
                 b.configure(bg=C["panel_alt"], fg=C["text_faint"])
             self._speed_btns[label].configure(bg=C["red"], fg="#fff")
             self._speed = SPEEDS[label]
-            prefs.set("speed", label)
+            prefs.set_value("speed", label)
 
         for i, label in enumerate(SPEEDS):
             b = tk.Label(speed_grid, text=label,
@@ -131,7 +131,7 @@ class RightPanelMixin:
         def _on_volume(v):
             self._vol_lbl.configure(text=f"{int(float(v))}%")
             self.player.volume = float(v) / 100
-            prefs.set("volume", self.player.volume)
+            prefs.set_value("volume", self.player.volume)
 
         vol_sl = tk.Scale(
             vol_row, from_=0, to=100, orient="horizontal",
@@ -156,7 +156,7 @@ class RightPanelMixin:
 
         def _on_pick_color(label):
             self._highlight_color.set(self._color_map.get(label, HIGHLIGHT_COLORS[self._pref_highlight_label]))
-            prefs.set("highlight_color_label", label)
+            prefs.set_value("highlight_color_label", label)
 
         color_menu = ctk.CTkOptionMenu(
             panel,

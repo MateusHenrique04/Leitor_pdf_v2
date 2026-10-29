@@ -34,7 +34,7 @@ def get_all() -> dict:
     return dict(_load())
 
 
-def set(key: str, value) -> None:
+def set_value(key: str, value) -> None:
     """Define uma preferência e persiste imediatamente."""
     d = _load()
     d[key] = value

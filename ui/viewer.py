@@ -294,20 +294,20 @@ class ViewerMixin:
 
     def _zoom_in(self):
         self._zoom = min(self._zoom_max, round(self._zoom + 0.25, 2))
-        prefs.set("zoom", self._zoom)
+        prefs.set_value("zoom", self._zoom)
         self._redraw()
 
     def _zoom_out(self):
         self._zoom = max(self._zoom_min, round(self._zoom - 0.25, 2))
         if self._zoom <= 1.0:
             self._pan_x = self._pan_y = 0
-        prefs.set("zoom", self._zoom)
+        prefs.set_value("zoom", self._zoom)
         self._redraw()
 
     def _zoom_reset(self):
         self._zoom  = 1.0
         self._pan_x = self._pan_y = 0
-        prefs.set("zoom", self._zoom)
+        prefs.set_value("zoom", self._zoom)
         self._redraw()
 
     # Máscara do bit "Control" no state de eventos do Tkinter (Windows/X11)
