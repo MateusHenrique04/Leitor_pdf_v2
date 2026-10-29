@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import data.highlights as highlights
@@ -293,7 +294,7 @@ class HighlightsMixin:
             messagebox.showinfo("Exportar Grifos", "Nenhum livro aberto.")
             return
 
-        all_h = highlights._load().get(self.current_path, {})
+        all_h = highlights.all_for_book(self.current_path)
         if not all_h:
             messagebox.showinfo("Exportar Grifos",
                                 "Nenhum grifo salvo neste livro.")
@@ -320,13 +321,12 @@ class HighlightsMixin:
             for h in page_highlights:
                 # Extrai o texto do trecho grifado via PDFRenderer
                 try:
-                    page_obj = self.renderer._doc[page_num - 1]
-                    rect = __import__("pymupdf").Rect(h["x0"], h["y0"],
-                                                   h["x1"], h["y1"])
-                    text = page_obj.get_text("text", clip=rect).strip()
-                    text = " ".join(text.split())  # normaliza espaços/quebras
+                    text = self.renderer.text_in_rect(
+                        page_num - 1, h["x0"], h["y0"], h["x1"], h["y1"],
+                    )
                 except Exception:
-                    text = "(texto não extraível)"
+                    text = ""
+                text = text or "(texto não extraível)"
                 color = h.get("color", DEFAULT_HIGHLIGHT_COLOR)
                 lines.append(f"> {text}")
                 lines.append(f"<!-- cor: {color} -->")
@@ -334,7 +334,7 @@ class HighlightsMixin:
 
         content_md = "\n".join(lines)
         try:
-            open(dest, "w", encoding="utf-8").write(content_md)
+            Path(dest).write_text(content_md, encoding="utf-8")
             messagebox.showinfo("Exportar Grifos",
                                 f"Grifos exportados com sucesso!\n{dest}")
         except Exception as e:

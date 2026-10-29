@@ -296,6 +296,19 @@ class PDFRenderer:
         ordered = [k for k in sorted_keys if k in hit_lines]
         return [_line_bbox(k) for k in ordered]
 
+    def text_in_rect(self, n: int, x0: float, y0: float, x1: float, y1: float) -> str:
+        """Retorna o texto contido no retângulo (em pontos PDF) da página n.
+        Usado para exportar o texto por baixo de um grifo sem a UI precisar
+        acessar _doc nem o tipo Rect do PyMuPDF diretamente."""
+        if n < 0 or n >= self.total:
+            return ""
+        with self._lock:
+            if self._closed:
+                return ""
+            rect = fitz.Rect(x0, y0, x1, y1)
+            text = self._doc[n].get_text("text", clip=rect)
+        return " ".join(text.split())
+
     def word_at(self, n: int, pdf_x: float, pdf_y: float) -> str | None:
         """
         Retorna a palavra que contém o ponto (pdf_x, pdf_y) na página n (0-indexed).

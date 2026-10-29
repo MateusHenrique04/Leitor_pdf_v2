@@ -53,6 +53,11 @@ def get(book_path: str, page: int) -> list[dict]:
     return data.get(book_path, {}).get(str(page), [])
 
 
+def all_for_book(book_path: str) -> dict[str, list[dict]]:
+    """Retorna todos os grifos do livro, por página (dict vazio se não houver)."""
+    return _load().get(book_path, {})
+
+
 def add(book_path: str, page: int, x0: float, y0: float,
         x1: float, y1: float,
         color: str = config.DEFAULT_HIGHLIGHT_COLOR, opacity: float = 0.35) -> None:

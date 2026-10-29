@@ -125,3 +125,19 @@ def test_concurrent_access_does_not_raise(sample_pdf_path):
 
     assert not errors
     r.close()
+
+
+def test_text_in_rect_returns_text_under_bbox(sample_pdf_path):
+    r = PDFRenderer(sample_pdf_path)
+    hits = r.search_text(0, "Capitulo Um")
+    assert hits
+    bbox = hits[0]
+    text = r.text_in_rect(0, bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
+    assert "Capitulo" in text
+    r.close()
+
+
+def test_text_in_rect_out_of_range_page_returns_empty(sample_pdf_path):
+    r = PDFRenderer(sample_pdf_path)
+    assert r.text_in_rect(99, 0, 0, 10, 10) == ""
+    r.close()
