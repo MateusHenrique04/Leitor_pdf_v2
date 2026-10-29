@@ -127,6 +127,13 @@ class HighlightsMixin:
           - O cursor y é atualizado progressivamente para não regredir.
 
         É executado ANTES do player.play(), então não bloqueia a UI.
+
+        Chamado pelo loop de leitura (ui/controls.py _read_loop) na thread
+        de background do asyncio — verificado (item 10 da auditoria): só
+        calcula dados (lê self.renderer, que já é thread-safe — ver
+        core/pdf_renderer.py — e self._eph_y_cursor) e não toca em nenhum
+        widget Tk nem chama self.after, então não precisa ser agendado na
+        thread principal.
         """
         if not self.renderer or not timings:
             return []
@@ -208,6 +215,13 @@ class HighlightsMixin:
         Fallback de grifo usado em seek/prev/next (sem áudio ativo).
         Durante a leitura normal, o grifo palavra-por-palavra é feito
         pelo loop em _read_loop via _precompute_word_bboxes.
+
+        Também chamado direto da thread de background do _read_loop
+        (verificado — item 10 da auditoria): só escreve em
+        self._ephemeral_highlights (lista Python simples, não um widget
+        Tk) e agenda o redesenho real com self.after(0, ...), que é a
+        forma correta de voltar para a thread principal. Não precisa de
+        mudança.
         """
         if not self.renderer or not self._current_text:
             return

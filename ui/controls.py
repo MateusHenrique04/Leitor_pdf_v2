@@ -131,6 +131,11 @@ class ControlsMixin:
             if page >= self.total_pages:
                 break
 
+            # self._ephemeral_highlights é reatribuída (não mutada em
+            # lugar) aqui e lida pela thread principal em _draw_image —
+            # revisado no item 10 da auditoria: é só uma troca de
+            # referência de lista, atômica em CPython, então o pior caso é
+            # desenhar um grifo um frame atrasado, nunca uma exceção.
             self._ephemeral_highlights = []
             # Atualiza visual da página
             self.after(0, lambda p=page: self._show_page(p))
