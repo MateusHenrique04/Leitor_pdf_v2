@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import re
 import threading
 import time
 import tkinter as tk
@@ -9,6 +8,7 @@ import data.library as lib
 import data.prefs as prefs
 from config import FONTS, PDF_RENDER_DPI, C
 from core import dictionary as dic
+from core.text import split_sentences
 from core.tts import speak
 from ui.widgets import flat_button
 
@@ -145,7 +145,7 @@ class ControlsMixin:
             self._detected_lang = dic.detect_lang(text[:500])
 
             # Divide em frases ou linhas
-            chunks = [c.strip() for c in re.split(r'(?<=[.!?])\s+|\n', text) if c.strip()]
+            chunks = split_sentences(text)
             if not chunks:
                 self.current_page += 1
                 self.current_chunk_idx = 0
@@ -290,7 +290,7 @@ class ControlsMixin:
         text = self.renderer.text_for_page(self.current_page)
         if not text:
             return []
-        return [c.strip() for c in re.split(r'(?<=[.!?])\s+|\n', text) if c.strip()]
+        return split_sentences(text)
 
     def _next_chunk(self):
         """Pula para a próxima frase. Se for a última, avança para a próxima página."""
