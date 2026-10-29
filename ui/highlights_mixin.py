@@ -102,12 +102,10 @@ class HighlightsMixin:
         page_highlights = highlights.get(self.current_path, self.current_page + 1)
         
         # Encontra o grifo clicado (do mais recente para o mais antigo)
-        for i in range(len(page_highlights) - 1, -1, -1):
-            h = page_highlights[i]
+        for h in reversed(page_highlights):
             # Considera uma pequena margem (2 pontos) para facilitar o clique
             if h["x0"] - 2 <= pdf_x <= h["x1"] + 2 and h["y0"] - 2 <= pdf_y <= h["y1"] + 2:
-                highlights.delete(self.current_path, self.current_page + 1, i)
-                highlights.save_to_disk()
+                highlights.delete(self.current_path, self.current_page + 1, h["id"])
                 self._redraw()
                 return
 
