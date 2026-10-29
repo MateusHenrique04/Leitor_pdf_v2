@@ -5,6 +5,7 @@ auditoria de código (antes não havia nenhum teste para os parsers nem
 para o comportamento de cache/rede).
 """
 import json
+import threading
 
 import pytest
 
@@ -106,3 +107,43 @@ def test_lookup_free_dict_parses_response(monkeypatch):
 def test_lookup_free_dict_no_response_returns_none(monkeypatch):
     monkeypatch.setattr(dic, "_get", lambda _url: None)
     assert dic._lookup_free_dict("xyz", "en") is None
+
+
+def test_cache_respects_max_size(monkeypatch):
+    monkeypatch.setattr(dic, "_lookup_dicio", lambda _w: None)
+    monkeypatch.setattr(dic, "_lookup_wiktionary_pt", lambda _w: None)
+    monkeypatch.setattr(dic, "_lookup_free_dict", lambda _w, _l: None)
+    monkeypatch.setattr(dic, "_CACHE_MAX_SIZE", 5)
+
+    for i in range(10):
+        dic.lookup(f"palavra{i}")
+
+    assert len(dic._dict_cache) <= 5
+    # As mais recentes continuam no cache; as mais antigas foram descartadas.
+    assert "palavra9:None" in dic._dict_cache
+    assert "palavra0:None" not in dic._dict_cache
+
+
+def test_cache_survives_concurrent_lookups(monkeypatch):
+    """Várias threads (uma por clique de palavra, como na UI real) usando
+    o cache ao mesmo tempo não deve lançar exceção nem corromper o dict."""
+    monkeypatch.setattr(dic, "_lookup_dicio", lambda w: {
+        "word": w, "phonetic": None, "lang": "pt-BR",
+        "source": "dicio.com.br", "meanings": [{"part_of_speech": "s.f.", "definitions": ["x"]}],
+    })
+    errors = []
+
+    def worker(i):
+        try:
+            for _ in range(20):
+                dic.lookup(f"palavra{i % 20}")
+        except Exception as e:  # pragma: no cover
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors

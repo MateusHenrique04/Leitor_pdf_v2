@@ -15,8 +15,10 @@ import html as html_mod
 import json
 import logging
 import re
+import threading
 import time
 import unicodedata
+from collections import OrderedDict
 
 log = logging.getLogger(__name__)
 
@@ -61,8 +63,15 @@ _UA_HEADERS = {
 # Resultados negativos ("não encontrado") ficam só _NEG_CACHE_TTL segundos,
 # para não travar permanentemente uma palavra que na verdade existe mas
 # falhou por instabilidade momentânea de um dos backends.
-_dict_cache: dict[str, tuple[dict | None, float | None]] = {}
+#
+# Uma clicada por palavra cria uma thread própria (ver ui/dict_popup.py),
+# então o dict global é alterado por várias threads ao mesmo tempo — daí
+# o lock. OrderedDict + limite de tamanho evita crescer sem fim numa
+# sessão longa (política LRU: descarta a entrada mais antiga).
+_dict_cache: OrderedDict[str, tuple[dict | None, float | None]] = OrderedDict()
+_cache_lock = threading.Lock()
 _NEG_CACHE_TTL = 600.0   # 10 minutos
+_CACHE_MAX_SIZE = 500
 
 
 class DictionaryNetworkError(Exception):
@@ -329,12 +338,14 @@ def lookup(word: str, detected_lang: str | None = None) -> dict | None:
         return None
 
     cache_key = f"{clean}:{detected_lang}"
-    cached = _dict_cache.get(cache_key)
-    if cached is not None:
-        value, expires_at = cached
-        if expires_at is None or time.time() < expires_at:
-            return value
-        del _dict_cache[cache_key]
+    with _cache_lock:
+        cached = _dict_cache.get(cache_key)
+        if cached is not None:
+            value, expires_at = cached
+            if expires_at is None or time.time() < expires_at:
+                _dict_cache.move_to_end(cache_key)   # LRU: marca como usada recentemente
+                return value
+            del _dict_cache[cache_key]
 
     network_errors = 0
     attempts = 0
@@ -366,7 +377,11 @@ def lookup(word: str, detected_lang: str | None = None) -> dict | None:
         return {"_network_error": True}   # não cacheia — permite nova tentativa
 
     expires_at = (time.time() + _NEG_CACHE_TTL) if result is None else None
-    _dict_cache[cache_key] = (result, expires_at)
+    with _cache_lock:
+        _dict_cache[cache_key] = (result, expires_at)
+        _dict_cache.move_to_end(cache_key)
+        while len(_dict_cache) > _CACHE_MAX_SIZE:
+            _dict_cache.popitem(last=False)   # descarta a entrada mais antiga
     return result
 
 
