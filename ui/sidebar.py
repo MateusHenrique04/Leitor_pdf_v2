@@ -161,7 +161,7 @@ class SidebarMixin:
             self.current_path = None
             self._timeline = None
             self._reading_pos = None
-            self._pos_floor = None
+            self._anchor_seconds = 0.0
             self._seek_bar.set_enabled(False)
             self._title_lbl.configure(text="Nenhum livro aberto")
             self._page_lbl.configure(text="")
@@ -264,7 +264,7 @@ class SidebarMixin:
         # varredura que o PDFRenderer já faz ao abrir o arquivo.
         self._timeline = BookTimeline(renderer.page_lengths, speed_pct=self._speed)
         self._reading_pos = None
-        self._pos_floor = None
+        self._publish_position()
         self._seek_bar.set_enabled(self._timeline.total_chars > 0)
 
         # Atualiza UI

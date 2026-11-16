@@ -146,7 +146,7 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
         # pela thread de leitura para a barra — ver _book_position_seconds.
         self._timeline = None
         self._reading_pos: tuple | None = None
-        self._pos_floor: float | None = None   # ver _refresh_timeline
+        self._anchor_seconds: float = 0.0      # ver _book_position_seconds
         self._detected_lang: str | None = None
         self._state_lock = threading.Lock()   # protege current_chunk_idx entre threads
         self._autoscroll_enabled: bool = self._pref_autoscroll   # scroll automático ligado/desligado

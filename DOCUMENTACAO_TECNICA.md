@@ -535,10 +535,23 @@ Dois detalhes de interface que vieram de defeitos observados rodando o app:
 - `_restart_loop` recalcula a posição na hora (`_publish_position`). Sem isso,
   depois de ±página ou ±trecho o rótulo continuava mostrando o ponto anterior
   até o novo trecho começar a tocar.
-- A posição exibida é travada contra retrocesso (`_pos_floor`). Lendo para a
-  frente ela nunca volta; sem a trava, o instante em que a calibração entra em
-  cena dava um pulo visível para trás. A trava é liberada em `_restart_loop`,
-  para a navegação para trás continuar funcionando.
+- A posição exibida **não** é calculada como `caracteres_lidos ÷ ritmo`. Ela
+  é a âncora do ponto onde a leitura começou (essa sim estimada) mais o tempo
+  de áudio efetivamente tocado desde então — e esse tempo vem da duração que o
+  próprio TTS reporta para cada trecho, não de estimativa.
+
+  A razão é um defeito medido na versão anterior, que usava a fórmula direta:
+  quando a calibração ajusta o ritmo, **toda** a linha do tempo reescala, e a
+  posição caía ~3% de uma vez — 38 segundos aos 20 minutos de livro. A
+  primeira tentativa de conserto foi travar o rótulo contra retrocesso, mas
+  isso só trocou o salto por um congelamento de ~40 s até a conta alcançar o
+  valor travado.
+
+  Ancorada no tempo tocado, a posição anda no ritmo do relógio e a
+  recalibração afeta apenas a duração TOTAL estimada. Como efeito colateral
+  ela também fica mais exata: o trecho já ouvido é contado pela duração real,
+  não pela estimativa. Medido com o ritmo mudando de 17,00 para 17,23 c/s no
+  meio da leitura, a posição seguiu avançando 4 s a cada 4 s, sem salto.
 
 ### 9.2.3 Decisões de interface medidas
 

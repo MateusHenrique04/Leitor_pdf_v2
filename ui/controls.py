@@ -160,46 +160,57 @@ class ControlsMixin:
         """
         Em que segundo do audiolivro a leitura está.
 
-        Interpola DENTRO do trecho que está tocando: um trecho dura ~20 s,
-        e sem interpolar a posição ficaria parada e daria um salto a cada
-        trecho, bem ao lado de um cronômetro que anda de segundo em
-        segundo.
+        A conta é: o ponto em que esta sessão de leitura começou (estimado
+        a partir do texto, em `_anchor_seconds`) MAIS o tempo de áudio
+        realmente tocado desde então. O tempo tocado não é estimado — vem
+        da duração que o próprio TTS reporta para cada trecho.
+
+        A versão anterior calculava a posição inteira como
+        `caracteres_lidos ÷ ritmo`. Parecia equivalente, mas tinha um
+        defeito observado rodando o app: quando a calibração ajusta o
+        ritmo (ver core/duration.py), TODA a linha do tempo reescala, e a
+        posição caía ~3% de uma vez — 38 segundos aos 20 minutos de
+        livro. Havia uma trava impedindo o rótulo de andar para trás, mas
+        ela só trocava o salto por um congelamento de ~40 s até a conta
+        alcançar o valor travado.
+
+        Ancorando no tempo tocado, a recalibração passa a afetar só a
+        duração TOTAL estimada — a posição anda sempre para a frente, no
+        ritmo do relógio, porque é isso que ela de fato mede.
         """
         if self._timeline is None:
             return 0.0
         pos = self._reading_pos
         if pos is None:
-            return self._timeline.seconds_at(self.current_page)
+            return self._anchor_seconds
 
-        page, chars_before, chunk_chars, page_chars, chunk_seconds = pos
+        tocado_antes, duracao_trecho = pos
         progresso = 0.0
-        if chunk_seconds > 0:
-            progresso = max(0.0, min(1.0, self.player.get_pos() / chunk_seconds))
-        lidos = chars_before + chunk_chars * progresso
-        fracao = lidos / page_chars if page_chars else 0.0
-        return self._timeline.seconds_at(page, fracao)
+        if duracao_trecho > 0:
+            progresso = max(0.0, min(1.0, self.player.get_pos() / duracao_trecho))
+        return self._anchor_seconds + tocado_antes + duracao_trecho * progresso
 
     def _publish_position(self):
         """
-        Recalcula a posição a partir de current_page/current_chunk_idx.
+        Fixa a âncora da posição no ponto atual (página + trecho).
 
-        O loop de leitura publica a posição quando um trecho começa a
-        tocar, mas isso leva o tempo de gerar o áudio. Sem recalcular aqui,
-        logo depois de ±página, ±trecho ou de um clique na barra o rótulo
-        continuaria mostrando o ponto ANTERIOR por alguns segundos.
+        Chamado sempre que a leitura salta: abrir um livro, ±página,
+        ±trecho, sumário, clique na barra de tempo. Daqui para a frente a
+        posição anda pelo tempo de áudio tocado, não pela estimativa — ver
+        _book_position_seconds.
         """
-        chunks = self._get_current_chunks()
-        if not chunks:
-            self._reading_pos = None
+        self._reading_pos = None
+        if self._timeline is None:
+            self._anchor_seconds = 0.0
             return
-        idx = max(0, min(self.current_chunk_idx, len(chunks) - 1))
-        self._reading_pos = (
-            self.current_page,
-            sum(len(c) for c in chunks[:idx]),
-            len(chunks[idx]),
-            sum(len(c) for c in chunks),
-            0.0,   # o trecho ainda não começou: sem progresso interno
-        )
+        chunks = self._get_current_chunks()
+        fracao = 0.0
+        if chunks:
+            idx = max(0, min(self.current_chunk_idx, len(chunks) - 1))
+            pagina_chars = sum(len(c) for c in chunks)
+            if pagina_chars:
+                fracao = sum(len(c) for c in chunks[:idx]) / pagina_chars
+        self._anchor_seconds = self._timeline.seconds_at(self.current_page, fracao)
 
     def _refresh_timeline(self):
         """Atualiza rótulos e barra. Chamado de segundo em segundo pelo
@@ -208,17 +219,6 @@ class ControlsMixin:
             return
         total = self._timeline.total_seconds
         atual = min(self._book_position_seconds(), total)
-
-        # Lendo para a frente, a posição nunca volta. Ela é derivada do
-        # ritmo estimado, e quando a calibração entra em cena (ver
-        # core/duration.py) esse ritmo muda — sem esta trava o rótulo
-        # daria um pulo para trás de alguns segundos nesse instante.
-        # _pos_floor é zerado em _restart_loop, que é por onde passa toda
-        # navegação (±página, ±trecho, sumário, clique na barra).
-        if self._pos_floor is not None:
-            atual = max(atual, self._pos_floor)
-        self._pos_floor = atual
-
         self._pos_lbl.configure(text=format_hms(atual))
         # O "~" é honesto: a duração é estimada a partir do texto, porque
         # o áudio só existe depois de sintetizado (ver core/duration.py).
@@ -279,6 +279,12 @@ class ControlsMixin:
         a fala acaba (core.tts.speech_end) e só resta uma pausa curta e
         deliberada entre os trechos.
         """
+        # Tempo de áudio já tocado nesta execução do loop, somado a partir
+        # da duração que o TTS reporta para cada trecho. É o que faz a
+        # posição na barra de tempo andar — ver _book_position_seconds.
+        # Zera junto com o loop, e o loop reinicia a cada navegação.
+        tocado = 0.0
+
         while self._is_current_gen(gen):
             page = self.current_page
             if page >= self.total_pages:
@@ -313,11 +319,6 @@ class ControlsMixin:
             if start_idx >= len(chunks):
                 start_idx = 0
 
-            # Caracteres desta página e quantos ficam para trás até o
-            # trecho corrente — a barra de tempo precisa dos dois para
-            # saber a que altura do livro a leitura está.
-            page_chars = sum(len(c) for c in chunks)
-            chars_before = sum(len(c) for c in chunks[:start_idx])
 
             # speak() nunca lança — já trata suas próprias falhas e retorna
             # (b"", []) para o loop pular o trecho (ver core/tts.py).
@@ -377,11 +378,10 @@ class ControlsMixin:
                 # usuário no meio do trecho não estraga a medição.
                 if stop_at:
                     duracao = stop_at + INTER_CHUNK_PAUSE_S
-                    self._reading_pos = (page, chars_before, len(chunks[i]),
-                                         page_chars, duracao)
+                    self._reading_pos = (tocado, duracao)
+                    tocado += duracao
                     if self._timeline is not None:
                         self._timeline.observe(len(chunks[i]), duracao)
-                chars_before += len(chunks[i])
 
                 word_idx = -1
                 while (self.player.is_busy() or self.player.is_paused) \
@@ -441,8 +441,7 @@ class ControlsMixin:
         self.player.stop()
         # Toda navegação (±página, ±trecho, sumário, barra de páginas,
         # barra de tempo) passa por aqui, então é o lugar certo para
-        # reposicionar a barra de tempo e liberar a trava de posição.
-        self._pos_floor = None
+        # reancorar a barra de tempo no ponto novo.
         self._publish_position()
         self._start_read_loop()
 
