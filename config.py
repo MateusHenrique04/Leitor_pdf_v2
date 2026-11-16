@@ -164,7 +164,27 @@ DEFAULT_SPEED = "1×"
 assert DEFAULT_SPEED in SPEEDS, "DEFAULT_SPEED precisa existir em SPEEDS"
 
 DEFAULT_VOLUME = 0.7
-PDF_RENDER_DPI = 100   # resolução da renderização das páginas
+# Resolução de renderização das páginas.
+#
+# PDF_RENDER_DPI é o PISO, não um valor fixo: a página é renderizada na
+# resolução que a tela realmente vai usar (ver ui/viewer._target_px_width).
+# Com um DPI fixo, um livro de formato pequeno — "Meditações Metafísicas",
+# 252x331 pt, metade de um A4 — rendia 350x460 px e era AMPLIADO para
+# preencher a janela: ampliar não cria detalhe, e o texto saía borrado.
+# Um A4 no mesmo DPI rende 827x1169 px, é REDUZIDO para caber, e por isso
+# sempre pareceu nítido. A resolução agora acompanha o tamanho de exibição.
+PDF_RENDER_DPI = 100
+# Teto de resolução: protege a memória com zoom alto (o zoom vai até 5x).
+# Acima disto a página volta a ser ampliada — já em resolução alta o
+# bastante para a diferença não aparecer.
+#
+# O teto é em PIXELS, não em DPI: é pixel que ocupa RAM, e o mesmo DPI
+# rende imagens de tamanhos bem diferentes conforme o formato do livro.
+# Um teto em DPI penalizaria justamente os livros pequenos, que precisam
+# de MAIS DPI para chegar à mesma quantidade de pixels — o problema que
+# esta mudança veio corrigir.
+PDF_RENDER_MAX_PX  = 4000   # maior lado da imagem renderizada, em pixels
+PDF_RENDER_CACHE_MB = 192   # orçamento do cache de páginas renderizadas
 
 # Cores disponíveis para grifos manuais — única fonte, usada por
 # ui/right_panel.py e ui/highlights_mixin.py.

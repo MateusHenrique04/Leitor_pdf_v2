@@ -6,7 +6,7 @@ import tkinter as tk
 
 import data.library as lib
 import data.prefs as prefs
-from config import FONTS, PDF_RENDER_DPI, WORD_HIGHLIGHT_OPACITY, C
+from config import FONTS, WORD_HIGHLIGHT_OPACITY, C
 from core import dictionary as dic
 from core.duration import format_hms
 from core.text import build_chunks
@@ -546,7 +546,7 @@ class ControlsMixin:
             y_center_pdf = (first["y0"] + first["y1"]) / 2.0
 
             # Converte coordenadas PDF (pontos) → pixels na imagem renderizada
-            zoom_pdf = PDF_RENDER_DPI / 72.0
+            zoom_pdf = self._img_px_per_pt()
             y_center_img = y_center_pdf * zoom_pdf
 
             cw = self._canvas.winfo_width()

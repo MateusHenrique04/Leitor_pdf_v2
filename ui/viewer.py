@@ -244,6 +244,49 @@ class ViewerMixin:
         ajuste = cw / iw if self._fit_mode == "largura" else min(cw / iw, ch / ih)
         return ajuste * self._zoom
 
+    def _target_px_width(self, n: int) -> int | None:
+        """
+        Largura, em pixels de tela, com que a página n vai ser exibida —
+        é a resolução em que ela precisa ser renderizada.
+
+        Faz a mesma conta de _page_scale, mas a partir do tamanho da
+        página em PONTOS, não da imagem já renderizada: quem decide a
+        resolução não pode depender da imagem que ainda vai ser criada.
+
+        Precisa rodar na thread da interface (lê o tamanho do canvas), por
+        isso é calculada antes de disparar a thread de renderização e
+        passada adiante como argumento.
+        """
+        if not self.renderer:
+            return None
+        cw = self._canvas.winfo_width()
+        ch = self._canvas.winfo_height()
+        if cw < 10 or ch < 10:
+            return None
+        w_pt, h_pt = self.renderer.page_size(n)
+        if not w_pt or not h_pt:
+            return None
+        ajuste = (cw / w_pt if self._fit_mode == "largura"
+                  else min(cw / w_pt, ch / h_pt))
+        return max(1, int(w_pt * ajuste * self._zoom))
+
+    def _img_px_per_pt(self) -> float:
+        """
+        Quantos pixels da imagem renderizada valem um ponto PDF.
+
+        Era a constante PDF_RENDER_DPI/72 espalhada por quatro lugares.
+        Como a resolução agora acompanha o tamanho de exibição, essa razão
+        muda com o zoom e com o formato do livro — medi-la na imagem de
+        verdade é o que mantém grifo, clique e auto-scroll alinhados ao
+        texto em qualquer resolução.
+        """
+        if self._cur_img is None or not self.renderer:
+            return PDF_RENDER_DPI / 72.0
+        w_pt, _h_pt = self.renderer.page_size(self.current_page)
+        if not w_pt:
+            return PDF_RENDER_DPI / 72.0
+        return self._cur_img.width / w_pt
+
     def _show_page(self, n: int):
         """
         Renderiza e exibe a página n no canvas.
@@ -279,22 +322,28 @@ class ViewerMixin:
 
         # Renderiza em thread separada para não travar a UI
         threading.Thread(
-            target=self._render_and_draw, args=(n, self.renderer), daemon=True,
+            target=self._render_and_draw,
+            args=(n, self.renderer, self._target_px_width(n)),
+            daemon=True,
         ).start()
 
-    def _render_and_draw(self, n: int, renderer):
+    def _render_and_draw(self, n: int, renderer, target_w: int | None = None):
         """Roda em background — renderiza a imagem e agenda o draw na UI.
 
         `renderer` é o renderer vigente no momento em que a renderização
         foi pedida (não `self.renderer`, que pode já ter sido trocado se o
         usuário virou de página ou de livro rápido — ver _draw_image_if_current).
+
+        `target_w` vem calculado pela thread da interface (_target_px_width):
+        aqui não se pode consultar o tamanho do canvas, Tkinter só responde
+        na própria thread.
         """
         try:
-            img = renderer.render_page(n)
+            img = renderer.render_page(n, target_w)
             if self._alive:
                 self.after(0, lambda i=img: self._draw_image_if_current(n, renderer, i))
-            # Pré-renderiza páginas adjacentes em background
-            renderer.prefetch(n)
+            # Pré-renderiza páginas adjacentes em background, na mesma resolução
+            renderer.prefetch(n, target_w)
         except Exception as e:
             log.error("Erro ao renderizar página %d: %s", n, e)
 
@@ -358,7 +407,11 @@ class ViewerMixin:
         # andou. A comparação é por identidade do objeto (o renderer
         # mantém as imagens vivas no seu próprio cache LRU).
         if self._scaled_src is not img or self._scaled_size != (nw, nh):
-            self._scaled_img  = img.resize((nw, nh), Image.LANCZOS)
+            # Com a resolução acompanhando a tela, o tamanho pedido quase
+            # sempre é o que já veio do renderer: aí não há o que
+            # reamostrar, e o LANCZOS seria trabalho jogado fora.
+            self._scaled_img  = (img if img.size == (nw, nh)
+                                 else img.resize((nw, nh), Image.LANCZOS))
             self._scaled_src  = img
             self._scaled_size = (nw, nh)
 
@@ -380,7 +433,7 @@ class ViewerMixin:
             )
 
         # Grifos: de pontos PDF direto para pixels do canvas
-        self._paint_highlights(frame, (PDF_RENDER_DPI / 72.0) * scale, x, y)
+        self._paint_highlights(frame, self._img_px_per_pt() * scale, x, y)
 
         tk_img = ImageTk.PhotoImage(frame)
         self._canvas.delete("all")
@@ -599,9 +652,9 @@ class ViewerMixin:
         iy = cy - img_y0
         if not (0 <= ix < nw and 0 <= iy < nh):
             return None
-        # ix/scale → pixel na imagem PIL original (renderizada a PDF_RENDER_DPI)
-        # ÷ (PDF_RENDER_DPI/72) → converte pixel para ponto PDF (72 DPI)
-        dpi_scale = PDF_RENDER_DPI / 72.0
+        # ix/scale → pixel na imagem PIL original
+        # ÷ px_por_ponto → converte pixel para ponto PDF (ver _img_px_per_pt)
+        dpi_scale = self._img_px_per_pt()
         pdf_x = (ix / scale) / dpi_scale
         pdf_y = (iy / scale) / dpi_scale
         return pdf_x, pdf_y
@@ -611,7 +664,8 @@ class ViewerMixin:
         if self.renderer and 0 <= self.current_page < self.total_pages:
             threading.Thread(
                 target=self._render_and_draw,
-                args=(self.current_page, self.renderer),
+                args=(self.current_page, self.renderer,
+                      self._target_px_width(self.current_page)),
                 daemon=True,
             ).start()
 
@@ -699,7 +753,9 @@ class ViewerMixin:
             self._prog_var.set(page + 1)
             self._page_lbl.configure(text=f"PÁG. {page + 1} / {self.total_pages}")
             threading.Thread(
-                target=self._render_and_draw, args=(page, self.renderer), daemon=True,
+                target=self._render_and_draw,
+                args=(page, self.renderer, self._target_px_width(page)),
+                daemon=True,
             ).start()
         # Destaca todos os resultados da página atual; o resultado corrente
         # (identificado por identidade do objeto, não por índice — a versão
@@ -711,7 +767,7 @@ class ViewerMixin:
             for r in self._search_results if r["page"] == page
         ]
         # Centraliza no resultado via pan
-        zoom_pdf = PDF_RENDER_DPI / 72.0
+        zoom_pdf = self._img_px_per_pt()
         y_center_pdf = (bbox["y0"] + bbox["y1"]) / 2.0
         if self._cur_img:
             ch = self._canvas.winfo_height()

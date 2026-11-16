@@ -8,7 +8,7 @@ import threading
 import pymupdf
 import pytest
 
-from core.pdf_renderer import PDFOpenError, PDFRenderer
+from core.pdf_renderer import _MAX_CACHED_PAGES, PDFOpenError, PDFRenderer
 
 
 def _save_pdf(tmp_path, name, build_fn):
@@ -163,14 +163,98 @@ def test_word_at_no_word_at_position_returns_none(sample_pdf_path):
     r.close()
 
 
+def _small_format_pdf(tmp_path):
+    """PDF de formato pequeno (252x331 pt, metade de um A4) — o caso que
+    saía borrado quando a renderização usava um DPI fixo."""
+    def build(doc):
+        page = doc.new_page(width=252, height=331)
+        page.insert_text((40, 60), "meditacoes metafisicas", fontsize=9)
+    return _save_pdf(tmp_path, "pequeno.pdf", build)
+
+
+def test_render_page_atende_a_largura_pedida(tmp_path):
+    """A página é renderizada no tamanho em que vai ser exibida, não num
+    DPI fixo — senão a tela precisa AMPLIAR a imagem, e o texto borra."""
+    r = PDFRenderer(_small_format_pdf(tmp_path))
+    base = r.render_page(0)                 # sem alvo: DPI base
+    alvo = 980
+    img = r.render_page(0, alvo)
+    assert base.width < alvo, "o DPI base já cobriria o alvo; teste inócuo"
+    assert img.width >= alvo, "renderizou menor que a exibição: vai borrar"
+    r.close()
+
+
+def test_dpi_for_nunca_fica_abaixo_do_piso(tmp_path):
+    """Exibição minúscula (ou desconhecida) não pode render menos que o
+    DPI base — o comportamento antigo é o piso, nunca o teto."""
+    from config import PDF_RENDER_DPI
+
+    r = PDFRenderer(_small_format_pdf(tmp_path))
+    assert r.dpi_for(0, None) == PDF_RENDER_DPI
+    assert r.dpi_for(0, 10) == PDF_RENDER_DPI
+    r.close()
+
+
+def test_dpi_for_respeita_o_teto_de_pixels(tmp_path):
+    """Zoom alto não pode estourar a memória: o maior lado da imagem fica
+    dentro de PDF_RENDER_MAX_PX."""
+    from config import PDF_RENDER_MAX_PX
+
+    r = PDFRenderer(_small_format_pdf(tmp_path))
+    img = r.render_page(0, 50_000)
+    assert max(img.size) <= PDF_RENDER_MAX_PX
+    r.close()
+
+
+def test_cache_separa_resolucoes_da_mesma_pagina(tmp_path):
+    """A mesma página em duas resoluções são duas entradas — voltar o zoom
+    reaproveita o que já foi renderizado em vez de refazer."""
+    r = PDFRenderer(_small_format_pdf(tmp_path))
+    a = r.render_page(0, 400)
+    b = r.render_page(0, 1200)
+    assert a.size != b.size
+    assert len(r._cache) == 2
+    assert r.render_page(0, 400) is a   # veio do cache, não re-renderizou
+    r.close()
+
+
+def test_cache_respeita_orcamento_de_memoria(tmp_path):
+    """O limite do cache é em RAM, não em número de páginas: uma página no
+    zoom máximo pesa dezenas de vezes mais que a mesma no DPI base."""
+    from config import PDF_RENDER_CACHE_MB
+
+    def build(doc):
+        for _ in range(6):
+            doc.new_page(width=252, height=331).insert_text((40, 60), "x")
+
+    r = PDFRenderer(_save_pdf(tmp_path, "varias.pdf", build))
+    for p in range(r.total):
+        r.render_page(p, 3000)
+    usado = sum(im.width * im.height * 3 for im in r._cache.values())
+    assert usado <= PDF_RENDER_CACHE_MB * 1024 * 1024
+    assert len(r._cache) >= 1
+    r.close()
+
+
+def test_page_size_devolve_pontos_do_pdf(tmp_path):
+    """page_size é a base da conversão ponto→pixel na UI (_img_px_per_pt);
+    se mentir, grifo e clique saem do lugar."""
+    r = PDFRenderer(_small_format_pdf(tmp_path))
+    w, h = r.page_size(0)
+    assert round(w) == 252 and round(h) == 331
+    assert r.page_size(99) == (0.0, 0.0)
+    r.close()
+
+
 def test_render_page_cache_is_lru(sample_pdf_path):
     r = PDFRenderer(sample_pdf_path)
-    # Preenche o cache além do limite (10) e garante que não lança erro
-    # e que a página mais recentemente usada permanece cacheada.
+    # Reacessa as páginas e garante que não lança erro e que o cache fica
+    # dentro do teto de entradas (o outro limite, de memória, tem teste
+    # próprio em test_cache_respeita_orcamento_de_memoria).
     for _ in range(2):
         for p in range(r.total):
             r.render_page(p)
-    assert len(r._cache) <= 10
+    assert len(r._cache) <= _MAX_CACHED_PAGES
     # Página 0 foi acessada por último no laço acima antes da 1 e 2 de novo
     # — só validamos que renderizar de novo não lança exceção.
     img = r.render_page(0)
