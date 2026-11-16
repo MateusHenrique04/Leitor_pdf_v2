@@ -430,29 +430,65 @@ Roda em `asyncio.run(...)` dentro de uma thread dedicada (thread ≠ UI thread;
 comunicação com Tk sempre via `self.after(0, ...)`). Pseudocódigo do fluxo
 por página:
 
-1. Extrai texto da página (`renderer.text_for_page`), divide em frases via
-   `core.text.split_sentences` (ignora abreviações comuns, decimais e
-   reticências usadas como pausa — a mesma função é usada por
-   `_get_current_chunks`, então o loop e a navegação por frase nunca veem
-   listas diferentes).
+1. Extrai o texto da página (`renderer.text_for_page`, que devolve **um
+   parágrafo por linha** — ver [§9.2.1](#921-o-que-define-a-fluidez-da-leitura))
+   e monta os trechos com `core.text.build_chunks`: as frases do mesmo
+   parágrafo são agrupadas até ~240 caracteres, sem nunca juntar parágrafos
+   diferentes. A mesma função serve `_get_current_chunks`, então o loop e os
+   botões `◂`/`▸` contam sempre os mesmos trechos.
 2. Detecta idioma da página (primeiros 500 chars) para alimentar o
    dicionário.
-3. Para cada frase (chunk), a partir de `current_chunk_idx`:
+3. Para cada trecho (chunk), a partir de `current_chunk_idx`:
    - **Pipeline de pré-geração**: enquanto o chunk `i` está tocando, já
-     dispara `asyncio.create_task(get_audio(chunks[i+1]))` para o próximo —
-     esconde a latência de rede do TTS entre frases.
-   - Assim que o áudio chega, grifa o chunk inteiro imediatamente
-     (`_highlight_ephemeral`, garante destaque mesmo antes do primeiro
-     word-timing) e pré-calcula os bboxes por palavra
-     (`_precompute_word_bboxes`) usando os `timings` do edge-tts.
-   - `player.play(audio)` e então um loop de polling (`await asyncio.sleep(0.03)`)
-     que consulta `player.get_pos()` e atualiza o grifo efêmero para a
-     palavra correspondente ao tempo de reprodução atual — é isso que produz
-     o destaque **palavra por palavra** sincronizado.
+     dispara `asyncio.create_task(speak(chunks[i+1]))` para o próximo —
+     esconde a latência de rede do TTS entre os trechos.
+   - Assim que o áudio chega, resolve o retângulo de cada palavra que será
+     falada (`_precompute_word_bboxes`, uma leitura da página com cache) e
+     pinta o trecho inteiro a partir deles (`_highlight_chunk_from_words`),
+     para nunca haver um instante sem indicação visual do que está sendo
+     lido. Sem `timings` (falha de rede) cai no caminho antigo,
+     `_highlight_ephemeral`.
+   - `player.play(audio)` e então um loop de polling (`await
+     asyncio.sleep(PLAYBACK_POLL_S)`) que consulta `player.get_pos()` e
+     move o grifo para a palavra correspondente ao tempo de reprodução —
+     é isso que produz o destaque **palavra por palavra** sincronizado.
+   - A reprodução para em `core.tts.speech_end(timings)`, e não quando o
+     MP3 acaba: todo arquivo do edge-tts traz ~0,9 s de silêncio depois da
+     última palavra.
    - Áudio vazio (falha de TTS) não trava o loop: mostra aviso transitório
-     (`_show_transient_status`) e segue para a próxima frase.
-4. Ao esgotar as frases da página, avança para `current_page + 1`; se for a
+     (`_show_transient_status`) e segue para o próximo trecho.
+4. Ao esgotar os trechos da página, avança para `current_page + 1`; se for a
    última página, marca o livro como lido (`lib.mark_finished`).
+
+#### 9.2.1 O que define a fluidez da leitura
+
+Cada trecho é **uma requisição ao edge-tts**, e toda requisição custa uma
+pausa. Medido neste projeto (voz `es-ES-AlvaroNeural`, mesmos números em
+pt-BR e en-US):
+
+| Parcela do silêncio entre trechos | Antes | Agora |
+|---|---|---|
+| Cauda de silêncio do MP3 após a última palavra | 0,88 s | 0,10 s (`SPEECH_TAIL_MARGIN`) |
+| `sleep` fixo no fim do laço | 0,15 s | 0,05 s (`INTER_CHUNK_PAUSE_S`) |
+| Busca do grifo do trecho (`search_text`) | 0,06 s | 0 s (vem dos bboxes) |
+| Bboxes por palavra (uma `search_text` por palavra) | 0,13 s | ~0 s (uma leitura da página, com cache) |
+| Silêncio inicial do MP3 seguinte | 0,25 s | 0,25 s |
+| **Pausa total entre trechos** | **1,39 s** | **0,45 s** |
+
+E, principalmente, **onde** a pausa cai. `text_for_page` antes devolvia uma
+linha *visual* do PDF por `
+`; como o divisor também quebra em `
+`, cada
+linha da página virava uma requisição própria — numa página típica, 49
+trechos de ~9 palavras, com a pausa caindo no meio das frases. Hoje são ~11
+trechos de frases inteiras, e a pausa só acontece onde ela soa natural:
+
+| | Antes | Agora |
+|---|---|---|
+| Trechos por página | 49 | 11 |
+| Palavras por trecho (média) | 9 | 25 |
+| Uma pausa a cada | 8,9 s | 21,7 s |
+| Silêncio por minuto de leitura | ~9,4 s | ~1,2 s |
 5. O loop observa um **token de geração** (`core.generation.GenerationGuard`,
    via `self._read_gen`), não um `threading.Event` compartilhado. Qualquer
    ação do usuário (próxima/página anterior, seek, TOC) chama
@@ -464,6 +500,81 @@ por página:
    (era exatamente esse caso que um `Event` reutilizado não cobria —
    `set()`+`clear()` tinha uma janela em que a thread antiga nunca via o
    `set()` e voltava a tocar junto com a nova).
+
+### 9.2.2 Barra de tempo do audiolivro (`core/duration.py`)
+
+O áudio nunca existe inteiro: cada trecho é sintetizado sob demanda. Não há
+arquivo cuja duração se possa medir, então a linha do tempo é **estimada** a
+partir da quantidade de texto, com uma constante de caracteres por segundo.
+
+Três decisões sustentam isso:
+
+1. **A posição na barra não depende da constante.** Ela é
+   `caracteres lidos ÷ caracteres totais`; a constante aparece nos dois lados
+   e se cancela. Só os rótulos de hora dependem do valor absoluto.
+2. **A constante é calibrada durante a leitura.** Cada trecho informa quantos
+   caracteres consumiram quanto tempo — medido pelos *timings* do próprio TTS
+   (`speech_end + INTER_CHUNK_PAUSE_S`), e não pelo relógio, para que uma
+   pausa do usuário no meio do trecho não entre na conta.
+3. **A calibração usa mediana, não média.** Com média, uma única medição
+   estranha (já observada: um trecho cujo TTS devolveu os limites de palavra
+   pela metade, dando ~64 c/s em vez de ~17) empurrava o total estimado de 12 h
+   para 8 h de uma vez — o rótulo oscilava horas no mesmo minuto de leitura.
+
+A quantidade de texto por página (`PDFRenderer.page_lengths`) sai de graça da
+varredura que o renderer já faz ao abrir o arquivo para detectar
+cabeçalho/rodapé — não custa uma segunda passagem pelo documento.
+
+Clicar na barra chama `BookTimeline.locate(segundos)`, que devolve
+`(página, fração dentro da página)`; a fração vira índice de trecho dentro de
+`build_chunks(...)` daquela página. Na prática o clique cai a **~8 segundos**
+do instante pedido — a granularidade de um trecho.
+
+Dois detalhes de interface que vieram de defeitos observados rodando o app:
+
+- `_restart_loop` recalcula a posição na hora (`_publish_position`). Sem isso,
+  depois de ±página ou ±trecho o rótulo continuava mostrando o ponto anterior
+  até o novo trecho começar a tocar.
+- A posição exibida é travada contra retrocesso (`_pos_floor`). Lendo para a
+  frente ela nunca volta; sem a trava, o instante em que a calibração entra em
+  cena dava um pulo visível para trás. A trava é liberada em `_restart_loop`,
+  para a navegação para trás continuar funcionando.
+
+### 9.2.3 Decisões de interface medidas
+
+Três mudanças de UI saíram de medição, não de gosto.
+
+**Quanto da tela é o livro.** O app existe para ler um livro, e o livro
+ocupava 15% a 22% da janela; o vazio em volta dele chegava a 36% — mais do
+que a própria página. A causa: só existia o ajuste "página inteira", e uma
+folha retrato num canvas deitado fica limitada pela ALTURA, sobrando tarjas
+dos dois lados. `ViewerMixin._page_scale` passou a ter também o ajuste por
+LARGURA (padrão), em que a página transborda para baixo e o auto-scroll
+acompanha a voz:
+
+| | antes | com ajuste por largura | + modo leitura |
+|---|---|---|---|
+| 1008×612 | 14,7% | 33,0% | — |
+| 1300×820 | 21,2% | 45,7% | **72,7%** |
+| 1920×1040 | 21,8% | 58,3% | — |
+
+**Legibilidade das cores.** Medindo o contraste WCAG de cada par
+(texto, fundo) realmente usado, **11 de 19 ficavam abaixo do mínimo**. O
+cinza `#505050` sobre o painel dá 2,28:1 e era a cor de quase todos os
+rótulos e botões; `"CONTROLES"`, em `#303030`, dava 1,40:1 — invisível. A
+rampa de seis níveis virou três, todos acima de 4,5:1, e o vermelho da
+marca deixou de ser usado em texto pequeno (3,1:1) em favor de `red_text`
+(5,6:1). Hoje são **0 de 20** reprovados.
+
+**Peso visual do rodapé.** O maior elemento da barra era o cronômetro da
+sessão — 16pt, negrito, vermelho — que é a informação menos acionável da
+tela, enquanto a posição no livro ficava em cinza de 9pt. Os dois trocaram
+de papel: a linha do audiolivro é o elemento principal e o cronômetro
+virou um rótulo discreto ao lado do auto-scroll.
+
+Os três números acima são reproduzíveis: a razão de contraste é
+determinística, e a área da página sai de `_page_scale()` com o tamanho do
+canvas.
 
 ### 9.3 Busca de texto e grifo automático (`search_text`)
 
@@ -663,7 +774,12 @@ tests/
 │                          # palavras únicas) + sem match, word_at,
 │                          # text_in_rect, cache LRU, TOC, acesso concorrente
 │                          # de 8 threads
-├── test_text.py          # split_sentences: abreviações PT/EN/ES, decimais,
+├── test_tts.py           # speech_end (onde a fala acaba dentro do MP3) e
+│                          # a exigência de boundary="WordBoundary"
+├── test_duration.py      # BookTimeline: posição/duração estimada do livro,
+│                          # calibração por mediana e casos degenerados
+├── test_word_highlight.py # casamento das palavras faladas com as da página
+├── test_text.py          # split_sentences + build_chunks: abreviações PT/EN/ES, decimais,
 │                          # reticências como pausa, texto vazio, quebras de
 │                          # linha
 ├── test_generation.py    # GenerationGuard — token nunca "revive" depois
@@ -767,8 +883,8 @@ nunca devem ser commitados.
 - **Biblioteca identifica livros pelo caminho do arquivo** — mover/renomear
   o PDF perde progresso e grifos salvos. Alternativa (identificar por hash
   do conteúdo) proposta em `docs/propostas/02-chave-biblioteca-por-hash.md`.
-- **Sem pré-geração de áudio multi-frase nem retry em falha de TTS** — já
-  pré-gera 1 frase adiante (ver [§9.2](#92-loop-de-leitura-controlsmixin_read_loop-assíncrono));
+- **Sem pré-geração de áudio multi-trecho nem retry em falha de TTS** — já
+  pré-gera 1 trecho adiante (ver [§9.2](#92-loop-de-leitura-controlsmixin_read_loop-assíncrono));
   ampliar isso e adicionar retry está proposto em
   `docs/propostas/03-pre-geracao-de-audio.md`.
 - **Um único processo, um único documento aberto por vez** — não há suporte
@@ -784,7 +900,7 @@ nunca devem ser commitados.
 
 | Termo | Significado no contexto do projeto |
 |---|---|
-| **Chunk** | Uma frase (ou linha) do texto da página, unidade de leitura do TTS — página é dividida em chunks via regex de pontuação/quebra de linha. |
+| **Chunk** | Unidade de leitura do TTS: uma ou mais frases inteiras do mesmo parágrafo, agrupadas até ~240 caracteres por `core.text.build_chunks`. Nunca atravessa parágrafo. |
 | **Grifo efêmero** | Destaque visual temporário (frase/palavra sendo lida), nunca persistido. |
 | **Grifo manual** | Destaque persistente, criado pelo usuário via seleção no canvas, salvo em `highlights.json`. |
 | **Word-timing / word-boundary** | Evento do `edge-tts` que informa o instante (em segundos) em que cada palavra começa/termina a ser falada — base do destaque palavra-por-palavra. |

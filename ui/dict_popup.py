@@ -89,7 +89,7 @@ class DictPopupMixin:
             tag_row.pack(side="right", padx=10)
             tk.Label(tag_row, text=lang_tag,
                      font=FONTS["label"],
-                     bg=C["red"], fg="#fff",
+                     bg=C["red"], fg=C["on_accent"],
                      padx=6, pady=2).pack()
 
             if result.get("phonetic"):
@@ -105,7 +105,7 @@ class DictPopupMixin:
                 tk.Label(inner,
                          text=meaning["part_of_speech"],
                          font=("Courier", 8, "bold italic"),
-                         bg=C["panel_alt2"], fg=C["red"],
+                         bg=C["panel_alt2"], fg=C["red_text"],
                          padx=12, anchor="w").pack(fill="x", pady=(4, 0))
                 for i, d in enumerate(meaning["definitions"], 1):
                     tk.Label(inner,
@@ -132,7 +132,7 @@ class DictPopupMixin:
         close_row.pack(fill="x", pady=(4, 6))
         close_btn = flat_button(
             close_row, "×  Fechar (Esc)", lambda: popup.destroy(),
-            font=FONTS["mono_bold"], bg=C["border"], fg="#888", hover_bg="#333",
+            font=FONTS["mono_bold"], bg=C["border"], fg=C["text_dim"], hover_bg=C["border_soft"],
         )
         close_btn.pack(side="right", padx=10)
 

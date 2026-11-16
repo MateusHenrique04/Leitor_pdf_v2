@@ -27,7 +27,13 @@ async def speak(text: str, voice: str, speed_pct: int) -> tuple[bytes, list[dict
         return b"", []
 
     rate = f"{speed_pct:+d}%"
-    comm = edge_tts.Communicate(text, voice, rate=rate)
+    # boundary="WordBoundary" é obrigatório: a partir do edge-tts 7 o
+    # padrão passou a ser "SentenceBoundary", e como o laço abaixo só
+    # reconhece mensagens WordBoundary a lista de timings vinha sempre
+    # vazia. Sem timings o grifo acompanha o texto em blocos grandes em
+    # vez de palavra por palavra, e o loop de leitura não sabe onde a
+    # fala termina dentro do MP3 (ver ui/controls.py).
+    comm = edge_tts.Communicate(text, voice, rate=rate, boundary="WordBoundary")
 
     buf      = bytearray()
     timings  = []          # [{word, start, end}]
@@ -61,3 +67,25 @@ async def speak(text: str, voice: str, speed_pct: int) -> tuple[bytes, list[dict
         log.warning("TTS: áudio vazio retornado sem exceção para o trecho: %r", text[:60])
 
     return bytes(buf), timings
+
+
+# Todo MP3 devolvido pelo edge-tts termina com ~0,9 s de silêncio depois
+# da última palavra — medido igual em pt-BR, en-US e es-ES. Como cada
+# trecho é um MP3 próprio, esperar esse silêncio acabar antes de tocar o
+# próximo somava quase um segundo de pausa em CADA frase lida.
+# SPEECH_TAIL_MARGIN é o quanto desse silêncio se mantém, para a frase
+# não terminar abruptamente.
+SPEECH_TAIL_MARGIN = 0.10
+
+
+def speech_end(timings: list[dict]) -> float | None:
+    """
+    Instante (em segundos, desde o início do MP3) a partir do qual só há
+    silêncio: fim da última palavra mais uma margem curta.
+
+    Retorna None quando não há timings — aí não dá para saber onde a fala
+    acaba e quem chama precisa esperar o MP3 inteiro.
+    """
+    if not timings:
+        return None
+    return timings[-1]["end"] + SPEECH_TAIL_MARGIN

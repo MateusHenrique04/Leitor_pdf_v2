@@ -9,6 +9,7 @@ import customtkinter as ctk
 import data.highlights as highlights
 import data.library as lib
 from config import FONTS, C
+from core.duration import BookTimeline
 from core.pdf_renderer import PDFOpenError, PDFRenderer
 from ui.widgets import flat_button
 
@@ -19,6 +20,7 @@ class SidebarMixin:
         sb = tk.Frame(self, bg=C["panel"], width=220)
         sb.grid(row=0, column=0, sticky="nsew")
         sb.grid_propagate(False)
+        self._sidebar_frame = sb   # escondido/mostrado pelo modo leitura
 
         # Logo
         logo = tk.Frame(sb, bg=C["panel"])
@@ -34,7 +36,7 @@ class SidebarMixin:
         # Botão adicionar (Ctrl+O também abre)
         add = flat_button(
             sb, "＋  Abrir PDF", self._open_file,
-            font=FONTS["body_bold"], bg=C["red"], fg="#fff", hover_bg=C["red_hot"],
+            font=FONTS["body_bold"], bg=C["red"], fg=C["on_accent"], hover_bg=C["red_hot"],
         )
         add.pack(fill="x", padx=16, pady=14)
 
@@ -49,7 +51,7 @@ class SidebarMixin:
             fg_color=C["border"],
             selected_color=C["red"],
             selected_hover_color=C["red_hot"],
-            text_color="#888",
+            text_color=C["text_dim"],
             unselected_color=C["panel"],
             unselected_hover_color=C["hover"]
         )
@@ -86,7 +88,7 @@ class SidebarMixin:
             row  = tk.Frame(outer, bg=C["panel"], cursor="hand2")
             row.pack(fill="x")
             dot = tk.Label(row, text="▸", font=("Courier", 9),
-                           bg=C["panel"], fg=C["red"], padx=10)
+                           bg=C["panel"], fg=C["red_text"], padx=10)
             dot.pack(side="left")
             lbl = tk.Label(row, text=disp, font=("Georgia", 10),
                            bg=C["panel"], fg=C["text_soft"],
@@ -122,7 +124,7 @@ class SidebarMixin:
             def _on(e, r=row, d=dot, lb=lbl, o=outer, pl=pct_lbl, b=btn_rm):
                 for w in (r, d, lb, o, pl, b):
                     w.configure(bg=C["panel_alt"])
-                b.configure(fg=C["red"])
+                b.configure(fg=C["red_text"])
 
             def _off(e, r=row, d=dot, lb=lbl, o=outer, pl=pct_lbl, b=btn_rm):
                 for w in (r, d, lb, o, pl, b):
@@ -157,6 +159,10 @@ class SidebarMixin:
                 self.renderer.close()
                 self.renderer = None
             self.current_path = None
+            self._timeline = None
+            self._reading_pos = None
+            self._pos_floor = None
+            self._seek_bar.set_enabled(False)
             self._title_lbl.configure(text="Nenhum livro aberto")
             self._page_lbl.configure(text="")
             self._canvas.delete("all")
@@ -254,6 +260,13 @@ class SidebarMixin:
 
         lib.save_total(path, self.total_pages)
 
+        # Linha do tempo do audiolivro. page_lengths sai de graça da
+        # varredura que o PDFRenderer já faz ao abrir o arquivo.
+        self._timeline = BookTimeline(renderer.page_lengths, speed_pct=self._speed)
+        self._reading_pos = None
+        self._pos_floor = None
+        self._seek_bar.set_enabled(self._timeline.total_chars > 0)
+
         # Atualiza UI
         name = os.path.basename(path)
         self._title_lbl.configure(text=name[:50] + "…" if len(name) > 50 else name)
@@ -278,6 +291,6 @@ class SidebarMixin:
         if not self.current_path or not hasattr(self, '_btn_mark_finished'):
             return
         if lib.is_finished(self.current_path):
-            self._btn_mark_finished.configure(text="📖 Marcar Não Lido", text_color=C["red"])
+            self._btn_mark_finished.configure(text="📖 Marcar Não Lido", text_color=C["red_text"])
         else:
             self._btn_mark_finished.configure(text="✅ Marcar Lido", text_color=C["text_dim"])

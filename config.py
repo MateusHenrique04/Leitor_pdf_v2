@@ -66,24 +66,51 @@ C = {
     "border":      "#242424",
     "border_soft": "#333333",
     "hover":       "#2E2E2E",
-    "red":         "#CC0000",
+    "red":         "#CC0000",   # preenchimentos e acentos — NÃO para texto pequeno
     "red_hot":     "#FF1A1A",
     "red_deep":    "#3A0000",   # fundo de estado "ativo/perigo" discreto
-    "text":        "#E8E8E8",
-    "text_dim":    "#505050",
-    "text_soft":   "#909090",
-    "text_soft2":  "#B0B0B0",
-    "text_faint":  "#606060",
-    "text_faint2": "#303030",
+    "red_text":    "#FF4D4D",   # ver nota de legibilidade abaixo
+    "on_accent":   "#FFFFFF",   # texto sobre preenchimento vermelho (5,9:1)
+
+    # ── Rampa de texto ───────────────────────────────────────────
+    # Três níveis, todos legíveis. Antes eram seis (#505050, #606060,
+    # #303030 entre eles), e os três mais escuros ficavam entre 1,4:1 e
+    # 2,7:1 de contraste sobre o fundo do painel — abaixo do mínimo de
+    # 4,5:1. Na prática os rótulos de seção, os botões do painel e a
+    # duração do livro eram quase invisíveis; "CONTROLES", a 1,4:1, não
+    # se lia de jeito nenhum.
+    #
+    # Os valores são o cinza mais escuro que ainda passa de 4,5:1 no
+    # fundo mais claro em que cada um é usado — mantém a intenção de
+    # "discreto" sem sacrificar a leitura.
+    "text":        "#E8E8E8",   # conteúdo principal        15,0:1
+    "text_soft":   "#B4B4B4",   # secundário                 8,2:1
+    "text_dim":    "#8C8C8C",   # rótulos, metadados         5,4:1 (4,6:1 sobre border)
     "success":     "#1DB954",
     "info":        "#00E5FF",   # grifo de leitura (TTS) e destaques de foco
     "warn":        "#FF6D00",   # resultado de busca atual
     "search":      "#FFD600",   # demais resultados de busca
 }
+# Nota de legibilidade: o vermelho da marca (#CC0000) rende só 3,1:1 sobre
+# o fundo escuro. Serve para preenchimento (com texto branco por cima,
+# 5,9:1) e para texto grande e em negrito, como o cronômetro — mas não
+# para rótulos pequenos. Para esses existe `red_text`, que mantém a
+# identidade e chega a 5,6:1.
 
 # ──────────────────────────────────────────────────────────────────
 # Tipografia — única fonte de verdade para toda a UI.
+#
+# Os rótulos que são só símbolo (▶ ⏸ ⏮ ⏭ ◂ ▸ ↕ + − ✕ ▾) usam
+# _SYMBOL_FAMILY, e não Georgia/Courier: nenhuma das duas tem esses
+# glifos, então o Tk ia buscar cada um numa fonte de fallback diferente.
+# O resultado aparecia na tela — "⏮"/"⏭" vinham desenhados dentro de uma
+# caixa enquanto "◂"/"▸" eram triângulos limpos, e o "⇕" do auto-scroll
+# saía como um borrão. Declarando a família que tem todos os glifos, o
+# conjunto inteiro vem do mesmo desenho. Em sistemas sem essa fonte o Tk
+# cai no fallback — o mesmo que já acontecia antes.
 # ──────────────────────────────────────────────────────────────────
+_SYMBOL_FAMILY = "Segoe UI Symbol"
+
 FONTS = {
     "logo":       ("Georgia", 20, "bold"),
     "title":      ("Georgia", 16, "bold"),
@@ -95,17 +122,29 @@ FONTS = {
     "label_lg":   ("Courier", 9, "bold"),
     "mono":       ("Courier", 9),
     "mono_bold":  ("Courier", 9, "bold"),
-    "timer":      ("Courier", 16, "bold"),
-    "icon":       ("Georgia", 15),
-    "icon_sm":    ("Georgia", 13),
+    "timeline":   ("Courier", 11, "bold"),  # posição/duração do audiolivro
+    # Rótulos que são só símbolo — ver _SYMBOL_FAMILY acima.
+    "icon_lg":    (_SYMBOL_FAMILY, 20),   # play/pause
+    "icon":       (_SYMBOL_FAMILY, 15),   # pular página
+    "icon_sm":    (_SYMBOL_FAMILY, 13),   # pular trecho
+    "symbol":     (_SYMBOL_FAMILY, 10, "bold"),   # zoom, busca, dropdown
 }
 
-# Vozes edge-tts
+# Vozes edge-tts. O rótulo segue sempre "Nome (IDIOMA-PAÍS)", então o
+# país já está no próprio nome: BR = Brasil, US = Estados Unidos,
+# ES = Espanha, MX = México.
+#
+# O espanhol aparece em duas variantes porque o sotaque muda bastante a
+# experiência de escuta: ES-ES é o espanhol peninsular (da Espanha) e
+# ES-MX é o mexicano — a variante usada como padrão neutro em dublagem e
+# audiolivros para a América Latina, o "espanhol latino".
 VOICES = {
     "Antonio (PT-BR)":   "pt-BR-AntonioNeural",
     "Francisca (PT-BR)": "pt-BR-FranciscaNeural",
     "Guy (EN-US)":       "en-US-GuyNeural",
     "Aria (EN-US)":      "en-US-AriaNeural",
+    "Jorge (ES-MX)":     "es-MX-JorgeNeural",
+    "Dalia (ES-MX)":     "es-MX-DaliaNeural",
     "Alvaro (ES-ES)":    "es-ES-AlvaroNeural",
     "Elvira (ES-ES)":    "es-ES-ElviraNeural",
 }
@@ -135,6 +174,12 @@ HIGHLIGHT_COLORS = {
     "🔵 Ciano":   "#00E5FF",
     "🔴 Rosa":    "#FF4081",
 }
+# Opacidade do trecho inteiro (fundo) e da palavra sendo falada durante
+# a leitura. Com valores próximos, a palavra corrente sumia dentro do
+# fundo do trecho; o fundo é bem mais fraco para ela se destacar.
+CHUNK_HIGHLIGHT_OPACITY = 0.18
+WORD_HIGHLIGHT_OPACITY  = 0.45
+
 DEFAULT_HIGHLIGHT_COLOR = "#FFDD00"
 DEFAULT_HIGHLIGHT_LABEL = "🟡 Amarelo"
 assert DEFAULT_HIGHLIGHT_LABEL in HIGHLIGHT_COLORS

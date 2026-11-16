@@ -4,13 +4,36 @@ import customtkinter as ctk
 
 import data.prefs as prefs
 from config import FONTS, HIGHLIGHT_COLORS, SPEEDS, VOICES, C
+from ui.widgets import CollapsibleSection
 
 
 class RightPanelMixin:
     def _build_right(self):
-        panel = tk.Frame(self, bg=C["panel"], width=200)
-        panel.grid(row=0, column=2, sticky="nsew")
-        panel.grid_propagate(False)
+        # O conteúdo deste painel mede ~640px de altura. Numa janela de
+        # 600–620px (o mínimo permitido é 900x600) o pack simplesmente
+        # deixava de mapear o que não cabia: "Iniciar Foco", o contador do
+        # foco e o botão "Ver Sumário" sumiam — sem corte visível, sem
+        # barra de rolagem, sem nenhuma pista de que existiam. Ficavam
+        # inalcançáveis até a janela ser aumentada.
+        #
+        # Com um frame rolável, o conteúdo que não cabe continua a um
+        # scroll de distância em qualquer tamanho de janela.
+        outer = tk.Frame(self, bg=C["panel"], width=216)
+        outer.grid(row=0, column=2, sticky="nsew")
+        outer.grid_propagate(False)
+        outer.grid_rowconfigure(0, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+        self._right_frame = outer   # escondido/mostrado pelo modo leitura
+
+        panel = ctk.CTkScrollableFrame(
+            outer,
+            fg_color=C["panel"],
+            scrollbar_button_color=C["border"],
+            scrollbar_button_hover_color=C["text_dim"],
+        )
+        panel.grid(row=0, column=0, sticky="nsew")
+        # A largura útil interna fica igual à de antes (200 − 32 de padx):
+        # 216 menos a barra de rolagem, menos os mesmos 32 de padx.
 
         def _sep():
             tk.Frame(panel, bg=C["border"], height=1).pack(fill="x", padx=16, pady=(10, 0))
@@ -18,10 +41,6 @@ class RightPanelMixin:
         def _lbl(text):
             tk.Label(panel, text=text, font=FONTS["label"],
                      bg=C["panel"], fg=C["text_dim"]).pack(anchor="w", padx=16, pady=(10, 4))
-
-        tk.Label(panel, text="CONTROLES", font=FONTS["label"],
-                 bg=C["panel"], fg=C["text_faint2"]).pack(anchor="w", padx=16, pady=(20, 4))
-        tk.Frame(panel, bg=C["border"], height=1).pack(fill="x", padx=16)
 
         # VOZ — dropdown (seleção inicial vem da preferência persistida)
         _lbl("VOZ")
@@ -33,12 +52,12 @@ class RightPanelMixin:
         vbtn.pack(fill="x", padx=16)
         self._voice_lbl = tk.Label(
             vbtn, text=voice_names[self._voice_idx],
-            font=FONTS["mono"], bg=C["panel_alt"], fg=C["text_soft2"],
+            font=FONTS["mono"], bg=C["panel_alt"], fg=C["text_soft"],
             anchor="w", padx=10, pady=8, wraplength=155,
         )
         self._voice_lbl.pack(side="left", fill="x", expand=True)
-        arr = tk.Label(vbtn, text="▾", font=("Courier", 11),
-                       bg=C["panel_alt"], fg=C["red"], padx=6)
+        arr = tk.Label(vbtn, text="▾", font=FONTS["symbol"],
+                       bg=C["panel_alt"], fg=C["red_text"], padx=6)
         arr.pack(side="right")
 
         self._voice_popup = tk.Frame(panel, bg=C["panel_alt2"],
@@ -51,6 +70,9 @@ class RightPanelMixin:
             self._voice_lbl.configure(text=name)
             self._voice = VOICES[name]
             prefs.set_value("voice", name)
+            # O ritmo aprendido era o da voz anterior; recomeça do padrão.
+            if self._timeline is not None:
+                self._timeline.reset_calibration()
             self._voice_popup.pack_forget()
             self._voice_popup_open = False
 
@@ -68,7 +90,7 @@ class RightPanelMixin:
                         text=("▸ " if sel else "   ") + name,
                         font=FONTS["mono"],
                         bg=C["select_bg"] if sel else C["panel_alt2"],
-                        fg=C["red"] if sel else C["text_soft2"],
+                        fg=C["red_text"] if sel else C["text_soft"],
                         anchor="w", padx=10, pady=7,
                         cursor="hand2", wraplength=165,
                     )
@@ -98,15 +120,19 @@ class RightPanelMixin:
 
         def _pick_speed(label):
             for _label, b in self._speed_btns.items():
-                b.configure(bg=C["panel_alt"], fg=C["text_faint"])
-            self._speed_btns[label].configure(bg=C["red"], fg="#fff")
+                b.configure(bg=C["panel_alt"], fg=C["text_dim"])
+            self._speed_btns[label].configure(bg=C["red"], fg=C["on_accent"])
             self._speed = SPEEDS[label]
             prefs.set_value("speed", label)
+            # A duração estimada do livro depende da velocidade escolhida.
+            if self._timeline is not None:
+                self._timeline.speed_pct = self._speed
+                self._refresh_timeline()
 
         for i, label in enumerate(SPEEDS):
             b = tk.Label(speed_grid, text=label,
                          font=FONTS["mono_bold"],
-                         bg=C["panel_alt"], fg=C["text_faint"],
+                         bg=C["panel_alt"], fg=C["text_dim"],
                          cursor="hand2", pady=6, anchor="center", width=5)
             b.grid(row=i // 3, column=i % 3, padx=2, pady=2, sticky="ew")
             speed_grid.grid_columnconfigure(i % 3, weight=1)
@@ -124,7 +150,7 @@ class RightPanelMixin:
         self._vol_lbl = tk.Label(
             vol_row, text=f"{int(self._pref_volume*100)}%",
             font=("Courier", 12, "bold"),
-            bg=C["panel"], fg=C["red"], width=5,
+            bg=C["panel"], fg=C["red_text"], width=5,
         )
         self._vol_lbl.grid(row=0, column=1, padx=(6, 0))
 
@@ -144,9 +170,25 @@ class RightPanelMixin:
         vol_sl.set(int(self._pref_volume * 100))
         vol_sl.grid(row=0, column=0, sticky="ew")
 
-        # GRIFOS — cores centralizadas em config.HIGHLIGHT_COLORS
+        # ── Seções recolhíveis ───────────────────────────────────
+        # Voz, velocidade e volume ficam sempre à mão porque se ajustam
+        # durante a leitura. O resto — grifos, ações do livro, modo foco
+        # — se usa uma vez por sessão e por isso começa recolhido: o
+        # painel inteiro passa a caber na tela sem rolagem.
         _sep()
-        _lbl("GRIFOS")
+        secoes_abertas = self._pref_panel_sections
+
+        def _secao(titulo: str, padrao: bool) -> CollapsibleSection:
+            sec = CollapsibleSection(
+                panel, titulo,
+                aberta=secoes_abertas.get(titulo, padrao),
+                on_toggle=self._on_section_toggle,
+            )
+            sec.pack(fill="x")
+            return sec
+
+        # GRIFOS — cores centralizadas em config.HIGHLIGHT_COLORS
+        grifos = _secao("Grifos", True).body
 
         color_labels = list(HIGHLIGHT_COLORS.keys())
         self._color_map = HIGHLIGHT_COLORS
@@ -159,7 +201,7 @@ class RightPanelMixin:
             prefs.set_value("highlight_color_label", label)
 
         color_menu = ctk.CTkOptionMenu(
-            panel,
+            grifos,
             variable  = self._color_var,
             values    = color_labels,
             command   = _on_pick_color,
@@ -168,21 +210,20 @@ class RightPanelMixin:
             button_hover_color= C["red"],
             text_color= C["text"],
         )
-        color_menu.pack(pady=(4, 0), padx=16, fill="x")
+        color_menu.pack(pady=(0, 0), padx=16, fill="x")
 
         self._btn_select = ctk.CTkButton(
-            panel,
+            grifos,
             text        = "✏ Selecionar",
             command     = self._toggle_hl_mode,
             fg_color    = C["border"],
-            hover_color = "#333",
+            hover_color = C["border_soft"],
             text_color  = C["text"],
         )
         self._btn_select.pack(pady=(8, 0), padx=16, fill="x")
 
-
         btn_clear = ctk.CTkButton(
-            panel,
+            grifos,
             text     = "🗑 Limpar página",
             command  = self._clear_page_highlights,
             fg_color = C["panel"],
@@ -192,7 +233,7 @@ class RightPanelMixin:
         btn_clear.pack(pady=(4, 0), padx=16, fill="x")
 
         btn_export = ctk.CTkButton(
-            panel,
+            grifos,
             text        = "📤 Exportar Grifos",
             command     = self._export_highlights,
             fg_color    = C["panel"],
@@ -203,12 +244,11 @@ class RightPanelMixin:
         )
         btn_export.pack(pady=(4, 0), padx=16, fill="x")
 
-        # STATUS
-        _sep()
-        _lbl("STATUS")
+        # ESTE LIVRO — ações que valem só para o livro aberto
+        livro = _secao("Este livro", False).body
 
         self._btn_mark_finished = ctk.CTkButton(
-            panel,
+            livro,
             text="✅ Marcar Lido",
             command=self._toggle_finished,
             fg_color=C["panel"],
@@ -217,33 +257,10 @@ class RightPanelMixin:
             border_width=1,
             border_color=C["border"]
         )
-        self._btn_mark_finished.pack(pady=(4, 0), padx=16, fill="x")
+        self._btn_mark_finished.pack(pady=(0, 0), padx=16, fill="x")
 
-        _sep()
-        _lbl("MODO FOCO")
-        self._focus_btn = ctk.CTkButton(
-            panel,
-            text="🎯 Iniciar Foco",
-            command=self._open_focus_dialog,
-            fg_color=C["panel"],
-            hover_color=C["border"],
-            text_color=C["text_dim"],
-            border_width=1,
-            border_color=C["border"],
-        )
-        self._focus_btn.pack(pady=(4, 0), padx=16, fill="x")
-
-        self._focus_lbl = tk.Label(
-            panel, text="",
-            font=FONTS["mono_bold"],
-            bg=C["panel"], fg=C["success"],
-        )
-        self._focus_lbl.pack(anchor="center", pady=(4, 0))
-
-        _sep()
-        _lbl("SUMÁRIO")
         btn_toc = ctk.CTkButton(
-            panel,
+            livro,
             text="📋 Ver Sumário",
             command=self._show_toc,
             fg_color=C["panel"],
@@ -253,3 +270,31 @@ class RightPanelMixin:
             border_color=C["border"]
         )
         btn_toc.pack(pady=(4, 0), padx=16, fill="x")
+
+        # MODO FOCO
+        foco = _secao("Modo foco", False).body
+        self._focus_btn = ctk.CTkButton(
+            foco,
+            text="🎯 Iniciar Foco",
+            command=self._open_focus_dialog,
+            fg_color=C["panel"],
+            hover_color=C["border"],
+            text_color=C["text_dim"],
+            border_width=1,
+            border_color=C["border"],
+        )
+        self._focus_btn.pack(pady=(0, 0), padx=16, fill="x")
+
+        self._focus_lbl = tk.Label(
+            foco, text="",
+            font=FONTS["mono_bold"],
+            bg=C["panel"], fg=C["success"],
+        )
+        self._focus_lbl.pack(anchor="center", pady=(4, 0))
+
+    def _on_section_toggle(self, titulo: str, aberta: bool):
+        """Lembra quais seções o usuário deixou abertas."""
+        estado = dict(self._pref_panel_sections)
+        estado[titulo] = aberta
+        self._pref_panel_sections = estado
+        prefs.set_value("panel_sections", estado)

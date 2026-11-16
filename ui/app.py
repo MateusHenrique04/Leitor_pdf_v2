@@ -4,11 +4,16 @@ ui/app.py — janela principal.
 Layout:
   ┌──────────┬─────────────────────────┬──────────┐
   │ SIDEBAR  │   VISUALIZADOR PDF      │  PAINEL  │
-  │  220px   │   (imagem da página)    │  200px   │
-  │          │                         │          │
+  │  220px   │   (imagem da página)    │  216px   │
+  │          │                         │ (rolável)│
   │          ├─────────────────────────┤          │
-  │          │   CONTROLES (140px)     │          │
+  │          │   CONTROLES             │          │
   └──────────┴─────────────────────────┴──────────┘
+
+A barra de controles e o painel da direita não têm altura fixa: ambos se
+ajustam ao conteúdo, e o painel rola quando a janela é baixa demais. Com
+alturas fixas, o pack do Tk simplesmente deixava de mapear o que não
+cabia — botões sumiam da tela sem nenhum aviso.
 
 Regra: lógica de negócio fica em core/ e data/.
        Este arquivo orquestra UI + chama os módulos, usando mixins.
@@ -102,6 +107,15 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
         _autoscroll = _p.get("autoscroll")
         self._pref_autoscroll = True if _autoscroll is None else bool(_autoscroll)
 
+        # Modo de ajuste da página: "largura" (padrão) ou "pagina".
+        # Ver ui/viewer._page_scale para o porquê do padrão.
+        _fit = _p.get("fit_mode")
+        self._pref_fit_mode = _fit if _fit in ("largura", "pagina") else "largura"
+
+        _secoes = _p.get("panel_sections")
+        self._pref_panel_sections = _secoes if isinstance(_secoes, dict) else {}
+        self._reading_mode = bool(_p.get("reading_mode"))
+
         # Estado
         self.renderer = None
         self.player     = Player()
@@ -127,6 +141,12 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
 
         self._ephemeral_highlights = []
         self._current_text = ""
+        # Linha do tempo estimada do audiolivro (core/duration.py); só
+        # existe com um livro aberto. _reading_pos é a posição publicada
+        # pela thread de leitura para a barra — ver _book_position_seconds.
+        self._timeline = None
+        self._reading_pos: tuple | None = None
+        self._pos_floor: float | None = None   # ver _refresh_timeline
         self._detected_lang: str | None = None
         self._state_lock = threading.Lock()   # protege current_chunk_idx entre threads
         self._autoscroll_enabled: bool = self._pref_autoscroll   # scroll automático ligado/desligado
@@ -149,18 +169,27 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
         self.player.volume = self._pref_volume
 
         # Zoom e pan da página
-        self._zoom       = self._pref_zoom   # 1.0 = ajusta ao canvas, >1.0 = zoom
+        self._zoom       = self._pref_zoom   # multiplicador sobre o ajuste
+        self._fit_mode   = self._pref_fit_mode   # "largura" | "pagina"
         self._zoom_min   = 1.0
         self._zoom_max   = 5.0
         self._pan_x      = 0            # offset de pan em pixels (imagem renderizada)
         self._pan_y      = 0
         self._pan_start  = None         # (x, y) do clique para arrastar
+        self._wheel_accum = 0           # delta da roda acumulado (ver _on_mousewheel)
         self._pan_pending_top = False   # True logo após abrir/trocar de página — ver _show_page
         self._cur_img    = None         # PIL Image da página atual (para redesenhar)
+        # Cache do redimensionamento da página para o tamanho de tela — ver
+        # ui/viewer._draw_image. Evita refazer o LANCZOS a cada palavra
+        # grifada durante a leitura.
+        self._scaled_img  = None
+        self._scaled_src  = None
+        self._scaled_size = (0, 0)
         
         self._lib_tab_var = ctk.StringVar(value="Lendo")
 
         self._build()
+        self._apply_reading_mode()
         self._bind_keys()
         self.protocol("WM_DELETE_WINDOW", self._quit)
         self._refresh_lib()
@@ -206,10 +235,25 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
         self.bind("<minus>",         lambda _: self._zoom_out())
         self.bind("<KP_Subtract>",   lambda _: self._zoom_out())
         self.bind("<Control-0>",     lambda _: self._zoom_reset())
+        # Modo leitura — esconde os painéis laterais
+        self.bind("<Tab>",           self._on_tab)
         # Esc universal — fecha o que estiver aberto (popup de dicionário,
         # barra de busca); cada Toplevel modal (foco, sumário, popup) tem
         # seu próprio bind de Esc além deste.
         self.bind("<Escape>",        lambda _: self._on_escape())
+
+    def _on_tab(self, _event=None):
+        """Tab alterna o modo leitura — menos quando o foco está num campo
+        de texto (busca, duração do foco), onde Tab é navegação entre
+        campos e precisa continuar sendo."""
+        try:
+            foco = self.focus_get()
+        except Exception:
+            foco = None
+        if foco is not None and foco.winfo_class() in ("Entry", "TEntry", "Text"):
+            return None
+        self._toggle_reading_mode()
+        return "break"
 
     def _on_escape(self):
         """Fecha, em ordem de prioridade, o que estiver aberto na janela
@@ -236,7 +280,8 @@ class App(SidebarMixin, ViewerMixin, ControlsMixin, RightPanelMixin, HighlightsM
             self._last_tick     = now
         m, s = divmod(int(self._session_secs), 60)
         h, m = divmod(m, 60)
-        self._timer_lbl.configure(text=f"{h:02d}:{m:02d}:{s:02d}")
+        self._timer_lbl.configure(text=f"sessão  {h:02d}:{m:02d}:{s:02d}")
+        self._refresh_timeline()
         self.after(1000, self._tick_timer)
 
     # ──────────────────────────────────────────────────────────────────

@@ -1,9 +1,13 @@
+import logging
 import os
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import data.highlights as highlights
-from config import DEFAULT_HIGHLIGHT_COLOR, C
+from config import CHUNK_HIGHLIGHT_OPACITY, DEFAULT_HIGHLIGHT_COLOR, C
+from core.word_sync import merge_rects_by_line, word_bboxes
+
+log = logging.getLogger(__name__)
 
 
 class HighlightsMixin:
@@ -19,7 +23,7 @@ class HighlightsMixin:
         else:
             self._canvas.configure(cursor="")
             self._btn_select.configure(
-                fg_color=C["border"], hover_color="#333",
+                fg_color=C["border"], hover_color=C["border_soft"],
                 text="✏ Selecionar"
             )
             # Limpa retângulo de seleção visual se houver
@@ -111,104 +115,65 @@ class HighlightsMixin:
 
     def _precompute_word_bboxes(
         self,
-        chunks: list[str],
-        chunk_idx: int,
         timings: list[dict],
         page: int,
     ) -> list[tuple[float, float, list[dict]]]:
         """
-        Para cada word-timing do chunk, encontra os retângulos no PDF.
-        Retorna lista de (start_s, end_s, [rects]) — uma entrada por palavra.
+        Retângulo de cada palavra que o TTS vai falar nesta página.
 
-        Estratégia de busca por contexto:
-          - Para localizar a palavra com precisão, busca uma janela de
-            "palavra_anterior + palavra + palavra_seguinte" no PDF.
-          - Se não achar com contexto, tenta a palavra isolada.
-          - O cursor y é atualizado progressivamente para não regredir.
+        O casamento em si é lógica pura e mora em core/word_sync.py; aqui
+        fica só o que é estado da UI: o cursor de posição dentro da
+        página, que faz cada trecho continuar de onde o anterior parou.
 
-        É executado ANTES do player.play(), então não bloqueia a UI.
-
-        Chamado pelo loop de leitura (ui/controls.py _read_loop) na thread
-        de background do asyncio — verificado (item 10 da auditoria): só
-        calcula dados (lê self.renderer, que já é thread-safe — ver
-        core/pdf_renderer.py — e self._eph_y_cursor) e não toca em nenhum
-        widget Tk nem chama self.after, então não precisa ser agendado na
-        thread principal.
+        Roda na thread de background do loop de leitura — só lê o renderer
+        (que é thread-safe) e devolve dados, sem tocar em widget Tk.
         """
         if not self.renderer or not timings:
             return []
+        try:
+            page_words = self.renderer.word_rects(page)
+        except Exception as e:
+            log.debug("word_rects falhou na página %d (ignorado): %s", page, e)
+            return []
 
-        result: list[tuple[float, float, list[dict]]] = []
-        cursor_y = getattr(self, "_eph_y_cursor", 0.0)
+        # Cursor por página: ao mudar de página ele volta ao começo.
+        if getattr(self, "_word_cursor_page", None) != page:
+            self._word_cursor_page = page
+            self._word_cursor = 0
 
-        # Palavras do chunk para montar janela de contexto
-        chunk_words = timings  # cada item: {word, start, end}
-
-        for wi, t in enumerate(chunk_words):
-            word = t["word"].strip()
-            if not word:
-                result.append((t["start"], t["end"], []))
-                continue
-
-            # Janela de contexto: até 2 palavras antes + atual + 2 depois
-            ctx_start = max(0, wi - 2)
-            ctx_end   = min(len(chunk_words), wi + 3)
-            context   = " ".join(cw["word"] for cw in chunk_words[ctx_start:ctx_end])
-
-            rects = []
-
-            # Tenta com contexto primeiro
-            if len(context) > len(word):
-                try:
-                    rects = self.renderer.search_text(page, context)
-                except Exception:
-                    rects = []
-
-            # Fallback: palavra isolada
-            if not rects and len(word) > 2:
-                try:
-                    rects = self.renderer.search_text(page, word)
-                except Exception:
-                    rects = []
-
-            # Filtra e escolhe o grupo à frente do cursor
-            if rects:
-                rects_sorted = sorted(rects, key=lambda r: r["y0"])
-
-                # Agrupa retângulos contíguos
-                sub_groups: list[list[dict]] = []
-                cur_sg: list[dict] = []
-                for rect in rects_sorted:
-                    if not cur_sg or rect["y0"] - cur_sg[-1]["y1"] <= 30:
-                        cur_sg.append(rect)
-                    else:
-                        sub_groups.append(cur_sg)
-                        cur_sg = [rect]
-                if cur_sg:
-                    sub_groups.append(cur_sg)
-
-                # Escolhe grupo à frente do cursor (nunca regride)
-                candidates = [
-                    sg for sg in sub_groups
-                    if min(r["y0"] for r in sg) >= cursor_y
-                ]
-                if candidates:
-                    best = min(candidates, key=lambda sg: min(r["y0"] for r in sg))
-                else:
-                    best = max(sub_groups, key=lambda sg: min(r["y0"] for r in sg))
-
-                cursor_y = max(r["y1"] for r in best)
-                rects = best
-
-            result.append((t["start"], t["end"], rects))
-
-        # Atualiza cursor para o próximo chunk
-        if result:
-            last_rects = next((r[2] for r in reversed(result) if r[2]), [])
-            if last_rects:
-                self._eph_y_cursor = max(r["y1"] for r in last_rects)
-
+        result, self._word_cursor = word_bboxes(page_words, timings, self._word_cursor)
         return result
+
+    def _highlight_chunk_from_words(
+        self, word_bboxes: list[tuple[float, float, list[dict]]]
+    ) -> bool:
+        """
+        Pinta de uma vez o trecho inteiro que está prestes a ser lido,
+        usando os retângulos já calculados em _precompute_word_bboxes.
+
+        É o "fundo" sobre o qual o grifo da palavra corrente se destaca.
+        Antes esse fundo vinha de _highlight_ephemeral(), que gasta uma
+        busca heurística na página (~60 ms) logo antes de tocar o áudio —
+        tempo morto entre uma frase e a seguinte. Aqui os retângulos já
+        estão na mão: só falta juntar as palavras de cada linha num
+        retângulo por linha, senão o desenho sai picotado palavra a
+        palavra.
+
+        Retorna False quando não há retângulo nenhum, para quem chama
+        cair no caminho antigo.
+        """
+        rects = [r for _, _, rs in word_bboxes for r in rs]
+        if not rects:
+            return False
+
+        self._ephemeral_highlights = [
+            {**r, "color": C["info"], "opacity": CHUNK_HIGHLIGHT_OPACITY}
+            for r in merge_rects_by_line(rects)
+        ]
+        self._eph_y_cursor = max(r["y1"] for r in rects)
+        if self._alive:
+            self.after(0, self._follow_highlight)
+        return True
 
     def _highlight_ephemeral(self):
         """
@@ -274,8 +239,7 @@ class HighlightsMixin:
             self._ephemeral_highlights.append(m)
 
         if self._alive:
-            self.after(0, self._redraw)
-            self.after(0, self._auto_scroll_to_highlight)
+            self.after(0, self._follow_highlight)
 
     def _highlight_manual(self):
         """Salva a posição do texto lido atualmente como grifo permanente."""

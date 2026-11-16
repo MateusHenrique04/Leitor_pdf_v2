@@ -69,7 +69,7 @@ class FocusMixin:
                 active = (m == mins)
                 b.configure(
                     bg=C["red"] if active else C["border"],
-                    fg="#fff"   if active else C["text_dim"],
+                    fg=C["on_accent"]   if active else C["text_dim"],
                 )
 
         for col, (label, mins) in enumerate(presets):
@@ -129,11 +129,11 @@ class FocusMixin:
 
         cancel_btn = flat_button(btn_row, "Cancelar", _cancel_dlg,
                                   font=FONTS["mono"], bg=C["border"], fg=C["text_dim"],
-                                  hover_bg="#333", padx=16, pady=8)
+                                  hover_bg=C["border_soft"], padx=16, pady=8)
         cancel_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
         start_btn = flat_button(btn_row, "🎯  Iniciar Foco", _start,
-                                 font=FONTS["mono_bold"], bg=C["red"], fg="#fff",
+                                 font=FONTS["mono_bold"], bg=C["red"], fg=C["on_accent"],
                                  hover_bg=C["red_hot"], padx=16, pady=8)
         start_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
@@ -158,7 +158,7 @@ class FocusMixin:
             text="🔴 Foco ativo — cancelar",
             fg_color=C["red_deep"],
             border_color=C["red"],
-            text_color=C["red"],
+            text_color=C["red_text"],
         )
         self._focus_tick()
 

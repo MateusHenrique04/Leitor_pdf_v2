@@ -4,6 +4,8 @@ core/pdf_renderer.py
 Responsabilidade única: abrir um PDF e fornecer:
   - render_page(n)  → imagem PIL da página n (para exibir)
   - text_for_page(n) → texto limpo da página n (para TTS)
+  - word_rects(n)   → palavras da página com seus retângulos (grifo)
+  - page_lengths    → quantidade de texto por página (duração estimada)
   - total_pages     → int
 
 Usa PyMuPDF (fitz). Para trocar a biblioteca de renderização, edite só este arquivo.
@@ -26,6 +28,40 @@ from PIL import Image
 from config import PDF_RENDER_DPI
 
 log = logging.getLogger(__name__)
+
+
+def normalize_word(s: str) -> str:
+    """Reduz uma palavra à forma usada para comparar o texto do PDF com o
+    texto devolvido pelo TTS: minúscula, sem acentuação quebrada (NFKC) e
+    sem pontuação. "«Mercados»," e "mercados" viram a mesma chave."""
+    return re.sub(r"\W", "", unicodedata.normalize("NFKC", s).lower())
+
+
+# Cabeçalhos e rodapés correntes são curtos ("www.editora.com — Página
+# 17", "CAPÍTULO 3 · 57"). Uma linha de texto corrido num livro comum tem
+# 70–95 caracteres. O limite separa os dois casos — ver _skip_key.
+_MAX_RUNNING_HEAD_CHARS = 60
+
+
+def _skip_key(line: str) -> str | None:
+    """
+    Chave usada para reconhecer a mesma linha de cabeçalho/rodapé em
+    páginas diferentes, ou None se a linha não pode ser candidata.
+
+    Dígitos viram "#" para que "Página 17" e "Página 18" contem como a
+    mesma linha repetida — sem isso o rodapé numerado nunca batia o
+    limiar de repetição e acabava lido em voz alta a cada página.
+
+    O mascaramento é limitado a linhas curtas: uma linha de texto corrido
+    que só mude um numeral ("...aumentou 3 por cento naquele ano.")
+    também viraria uma "repetição" depois de mascarada, e conteúdo de
+    verdade seria descartado. Linhas sem dígito nenhum não são afetadas
+    pelo mascaramento e por isso não precisam do limite.
+    """
+    line = line.strip()
+    if any(c.isdigit() for c in line) and len(line) > _MAX_RUNNING_HEAD_CHARS:
+        return None
+    return re.sub(r"\d+", "#", line)
 
 
 class PDFOpenError(Exception):
@@ -58,20 +94,39 @@ class PDFRenderer:
             raise PDFOpenError("O PDF não contém nenhuma página.")
 
         self._cache: OrderedDict[int, Image.Image] = OrderedDict()   # LRU de páginas renderizadas
+        # LRU das palavras já extraídas por página (ver word_rects)
+        self._words_cache: OrderedDict[int, list[tuple[str, dict]]] = OrderedDict()
 
         # Detecta cabeçalhos/rodapés repetidos (≥30% das páginas) para remover do TTS
         # (__init__ roda antes de qualquer outra thread conhecer este
         # renderer, então o lock aqui é só por consistência com os demais
         # métodos, não por uma race real.)
+        #
+        # A contagem usa a linha com os dígitos mascarados (_skip_key): a
+        # maioria dos rodapés carrega o número da página — "Editora X —
+        # Página 17", "17 | Capítulo 2" — e com a string literal como chave
+        # cada página virava uma ocorrência única, nunca batendo o limiar.
+        # O rodapé escapava e era lido em voz alta a cada virada de página.
+        #
+        # A mesma varredura já tem o texto de cada página na mão, então
+        # aproveita para medir quanto texto cada uma tem (page_lengths):
+        # é disso que sai a estimativa de duração do audiolivro, sem
+        # custar uma segunda passagem pelo documento.
         hdr: dict[str, int] = {}
         ftr: dict[str, int] = {}
+        self.page_lengths: list[int] = []
         with self._lock:
             for page in self._doc:
                 lines = [ln.strip() for ln in page.get_text().split("\n") if ln.strip()]
+                self.page_lengths.append(sum(len(ln) for ln in lines))
                 if lines:
-                    hdr[lines[0]]  = hdr.get(lines[0], 0) + 1
+                    k = _skip_key(lines[0])
+                    if k is not None:
+                        hdr[k] = hdr.get(k, 0) + 1
                 if len(lines) > 1:
-                    ftr[lines[-1]] = ftr.get(lines[-1], 0) + 1
+                    k = _skip_key(lines[-1])
+                    if k is not None:
+                        ftr[k] = ftr.get(k, 0) + 1
 
         thr = max(3, int(self.total * 0.30))
         self._skip = {k for k, v in {**hdr, **ftr}.items() if v >= thr}
@@ -98,21 +153,98 @@ class PDFRenderer:
         return img
 
     def text_for_page(self, n: int) -> str:
-        """Retorna o texto limpo da página n (0-indexed) para o TTS."""
+        """
+        Retorna o texto limpo da página n (0-indexed) para o TTS, com UM
+        parágrafo por linha.
+
+        Por que não usar `get_text()` direto: o PDF guarda cada linha
+        *visual* separada por "\\n", então uma frase que ocupa três linhas
+        na página volta como três linhas de texto. Como quem consome isto
+        (core/text.py) também quebra em "\\n", cada linha virava uma
+        requisição de TTS própria — uma frase era lida em três pedaços,
+        com uma pausa (e entonação de fim de frase) no meio. Numa página
+        típica isso dava ~49 trechos de ~9 palavras em vez de ~12 frases
+        inteiras.
+
+        `get_text("blocks")` entrega os blocos de texto que o PyMuPDF já
+        agrupa — na prática, parágrafos e títulos. Juntando as linhas de
+        dentro de cada bloco com espaço e separando os blocos com "\\n",
+        o "\\n" passa a significar "fim de parágrafo" de verdade.
+        """
         with self._lock:
             if self._closed:
                 return ""
-            raw = unicodedata.normalize("NFKC", self._doc[n].get_text())
-        lines = [ln for ln in raw.split("\n") if ln.strip() not in self._skip]
-        text  = "\n".join(lines)
-        # Corrige hifenização de fim de linha
-        text  = re.sub(r"(\w+)-\n(\w+)", r"\1\2", text)
-        # Remove números de página isolados
-        text  = re.sub(r"^\s*\d{1,4}\s*$", "", text, flags=re.MULTILINE)
-        # Normaliza espaços
-        text  = re.sub(r"[ \t]+", " ", text)
-        text  = re.sub(r"\n{3,}", "\n\n", text)
+            blocks = self._doc[n].get_text("blocks")
+
+        paragraphs = []
+        for b in blocks:
+            # b = (x0, y0, x1, y1, texto, bloco_n, tipo); tipo 1 = imagem
+            if len(b) > 6 and b[6] != 0:
+                continue
+            raw = unicodedata.normalize("NFKC", str(b[4]))
+            # Hifenização dentro do bloco: "hifeniza-\ncao" → "hifenizacao".
+            # Feito antes de juntar as linhas, senão o hífen vira "- " solto.
+            raw = re.sub(r"(\w)-\n(\w)", r"\1\2", raw)
+            lines = []
+            for ln in raw.split("\n"):
+                ln = ln.strip()
+                key = _skip_key(ln)
+                if not ln or (key is not None and key in self._skip):
+                    continue
+                # Número de página isolado não é conteúdo para ler em voz alta
+                if re.fullmatch(r"\d{1,4}", ln):
+                    continue
+                lines.append(ln)
+            if lines:
+                paragraphs.append(" ".join(lines))
+
+        text = "\n".join(paragraphs)
+        # Hifenização que caiu entre dois blocos (PDFs em que cada linha
+        # vira um bloco próprio) — mesma regra, agora entre parágrafos.
+        text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
+        text = re.sub(r"[ \t]+", " ", text)
         return text.strip()
+
+    def word_rects(self, n: int) -> list[tuple[str, dict]]:
+        """
+        Palavras da página n em ordem de leitura, cada uma com o seu
+        retângulo em pontos PDF: [(palavra_normalizada, {x0,y0,x1,y1}), ...]
+
+        Serve ao grifo que acompanha a voz. A alternativa — chamar
+        search_text() uma vez por palavra — custava ~9 ms por palavra e,
+        por casar o trecho por âncoras, devolvia a LINHA inteira em vez do
+        retângulo da palavra. Aqui uma única leitura da página resolve o
+        trecho todo, e o retângulo é o da palavra de verdade.
+
+        O resultado fica em cache porque o loop de leitura percorre vários
+        trechos da mesma página em sequência.
+        """
+        if n < 0 or n >= self.total:
+            return []
+        with self._lock:
+            if self._closed:
+                return []
+            cached = self._words_cache.get(n)
+            if cached is not None:
+                self._words_cache.move_to_end(n)
+                return cached
+            raw = self._doc[n].get_text("words")
+
+        # (x0, y0, x1, y1, palavra, bloco, linha, n_palavra) — a ordem de
+        # leitura é a de (bloco, linha, palavra), não a da lista crua.
+        ordered = sorted(raw, key=lambda w: (int(w[5]), int(w[6]), int(w[7])))
+        words = [
+            (normalize_word(w[4]),
+             {"x0": w[0], "y0": w[1], "x1": w[2], "y1": w[3]})
+            for w in ordered
+            if normalize_word(w[4])
+        ]
+
+        with self._lock:
+            if len(self._words_cache) >= 6:
+                self._words_cache.popitem(last=False)
+            self._words_cache[n] = words
+        return words
 
     def search_text(self, n: int, text: str) -> list[dict]:
         """
@@ -372,3 +504,4 @@ class PDFRenderer:
             self._closed = True
             self._doc.close()
             self._cache.clear()
+            self._words_cache.clear()

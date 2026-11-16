@@ -1,6 +1,21 @@
 # Proposta: ampliar a pré-geração de áudio
 
-**Status:** aguardando aprovação — não implementar sem decisão do autor.
+**Status:** PARCIALMENTE RESOLVIDA.
+
+O último item — avaliar o `asyncio.sleep(0.15)` fixo entre frases — foi
+tratado: medido, o silêncio entre dois trechos era de 1,39 s, e o sleep
+era só uma parte dele (a maior era ~0,9 s de silêncio que todo MP3 do
+edge-tts traz depois da última palavra). Hoje a reprodução para em
+`core.tts.speech_end` e o sleep virou `INTER_CHUNK_PAUSE_S = 0.05`, uma
+pausa deliberada e documentada; o total entre trechos caiu para 0,45 s.
+Ver §9.2.1 da documentação técnica.
+
+**Continua aguardando decisão:** pré-gerar 2–3 trechos adiante, cache de
+áudio por página e retry em falha de geração.
+
+---
+
+*(texto original da proposta abaixo)*
 
 ## Problema
 

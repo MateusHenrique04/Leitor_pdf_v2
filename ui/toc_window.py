@@ -56,7 +56,7 @@ class TocMixin:
             row.pack(fill="x", pady=1)
 
             # Indicador de nível
-            color = C["red"] if level == 1 else C["text_dim"]
+            color = C["red_text"] if level == 1 else C["text_dim"]
             prefix = "▸ " if level == 1 else "  · "
             lbl = tk.Label(row,
                            text=prefix + title,

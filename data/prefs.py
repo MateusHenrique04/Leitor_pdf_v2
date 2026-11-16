@@ -14,6 +14,9 @@ _DEFAULTS = {
     "speed": None,                  # label (chave de SPEEDS); None = usa DEFAULT_SPEED
     "volume": None,                 # 0..1; None = usa DEFAULT_VOLUME
     "zoom": None,                   # float; None = usa o padrão da UI
+    "fit_mode": None,               # "largura" | "pagina"; None = "largura"
+    "panel_sections": None,         # {titulo: aberta}; None = padrões da UI
+    "reading_mode": False,          # painéis laterais escondidos
     "autoscroll": True,
     "highlight_color_label": None,  # None = usa DEFAULT_HIGHLIGHT_LABEL
 }

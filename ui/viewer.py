@@ -49,8 +49,8 @@ class ViewerMixin:
 
         def _zoom_btn(parent, text, cmd):
             b = flat_button(parent, text, cmd,
-                             font=FONTS["mono_bold"], bg=C["border"], fg=C["text"],
-                             hover_bg="#333", padx=8, pady=2)
+                             font=FONTS["symbol"], bg=C["border"], fg=C["text"],
+                             hover_bg=C["border_soft"], padx=8, pady=2)
             b.pack(side="left", padx=2)
             return b
 
@@ -61,12 +61,28 @@ class ViewerMixin:
                                    width=5, anchor="center")
         self._zoom_lbl.pack(side="left")
         _zoom_btn(zoom_row, "＋", self._zoom_in)
-        _zoom_btn(zoom_row, "⊡", self._zoom_reset)
+
+        # Alterna entre ajustar à largura e ajustar à página inteira, e
+        # zera o zoom. O rótulo diz o modo ATUAL — um ícone sozinho não
+        # conseguiria comunicar qual dos dois está valendo.
+        self._fit_btn = flat_button(
+            zoom_row, "", self._toggle_fit_mode,
+            font=FONTS["mono_bold"], bg=C["border"], fg=C["text"],
+            hover_bg=C["border_soft"], padx=8, pady=2)
+        self._fit_btn.pack(side="left", padx=2)
+        self._update_fit_btn()
+
+        # Modo leitura: esconde biblioteca e painel de ajustes (Tab).
+        self._reading_btn = flat_button(
+            zoom_row, "⛶", self._toggle_reading_mode,
+            font=FONTS["symbol"], bg=C["border"], fg=C["text"],
+            hover_bg=C["border_soft"], padx=8, pady=2)
+        self._reading_btn.pack(side="left", padx=(8, 2))
 
         self._page_lbl = tk.Label(
             topbar, text="",
             font=("Courier", 10, "bold"),
-            bg=C["panel"], fg=C["red"],
+            bg=C["panel"], fg=C["red_text"],
             anchor="e", padx=18,
         )
         self._page_lbl.grid(row=1, column=2, sticky="e")
@@ -93,7 +109,7 @@ class ViewerMixin:
         viewer.grid_rowconfigure(1, weight=0)
         viewer.grid_rowconfigure(2, weight=1)
 
-        tk.Label(self._search_bar, text="🔍", font=("Courier", 10),
+        tk.Label(self._search_bar, text="🔍", font=FONTS["symbol"],
                  bg=C["panel"], fg=C["text_dim"], padx=8).pack(side="left")
         self._search_var = tk.StringVar()
         self._search_entry = tk.Entry(
@@ -109,13 +125,13 @@ class ViewerMixin:
         self._search_count_lbl.pack(side="left")
         for txt, cmd in [("▲", lambda: self._search_navigate(-1)),
                          ("▼", lambda: self._search_navigate(+1))]:
-            b = tk.Label(self._search_bar, text=txt, font=("Courier", 11, "bold"),
+            b = tk.Label(self._search_bar, text=txt, font=FONTS["symbol"],
                          bg=C["border"], fg=C["text"], cursor="hand2", padx=8, pady=4)
             b.pack(side="left", padx=2, pady=4)
             b.bind("<Button-1>", lambda e, c=cmd: c())
-            b.bind("<Enter>", lambda e, bb=b: bb.configure(bg="#333"))
+            b.bind("<Enter>", lambda e, bb=b: bb.configure(bg=C["border_soft"]))
             b.bind("<Leave>", lambda e, bb=b: bb.configure(bg=C["border"]))
-        close_s = tk.Label(self._search_bar, text="✕", font=("Courier", 11, "bold"),
+        close_s = tk.Label(self._search_bar, text="✕", font=FONTS["symbol"],
                            bg=C["panel"], fg=C["text_dim"], cursor="hand2", padx=10)
         close_s.pack(side="right")
         close_s.bind("<Button-1>", lambda _: self._close_search())
@@ -147,12 +163,105 @@ class ViewerMixin:
         # ── Barra de controles ──
         self._build_controls(center)
 
+    def _toggle_reading_mode(self):
+        """Liga/desliga o modo leitura (atalho: Tab)."""
+        self._reading_mode = not self._reading_mode
+        prefs.set_value("reading_mode", self._reading_mode)
+        self._apply_reading_mode()
+
+    def _apply_reading_mode(self):
+        """
+        Esconde ou mostra os painéis laterais.
+
+        Durante a leitura, biblioteca e ajustes ficam ocupando ~40% da
+        janela sem serem tocados. Escondê-los leva a página de ~46% para
+        ~80% da tela. Os widgets continuam existindo — só saem do grid —,
+        então nada precisa ser reconstruído nem perde estado.
+        """
+        if self._reading_mode:
+            self._sidebar_frame.grid_remove()
+            self._right_frame.grid_remove()
+        else:
+            self._sidebar_frame.grid()
+            self._right_frame.grid()
+        self._reading_btn.label.configure(
+            fg=C["red_text"] if self._reading_mode else C["text"])
+        # O canvas mudou de tamanho: redesenha já, sem esperar o
+        # <Configure> (que pode demorar um frame e piscar).
+        self.after_idle(self._redraw)
+
+    def _max_pan(self) -> tuple[int, int]:
+        """
+        Até onde o pan pode ir em cada eixo.
+
+        O limite é exatamente o que mantém a página cobrindo o canvas: se
+        ela é maior que a tela, dá para percorrê-la inteira; se é menor,
+        fica centralizada e não há o que arrastar.
+
+        O limite anterior permitia ir um quarto da página ALÉM disso. Com
+        o ajuste por largura isso virou defeito visível: o auto-scroll
+        centraliza o grifo, e quando o trecho lido estava perto do topo da
+        página ele empurrava a página para baixo e abria uma faixa preta
+        acima dela.
+        """
+        if self._cur_img is None:
+            return 0, 0
+        cw = self._canvas.winfo_width()
+        ch = self._canvas.winfo_height()
+        iw, ih = self._cur_img.size
+        escala = self._page_scale()
+        return (max(0, (int(iw * escala) - cw) // 2),
+                max(0, (int(ih * escala) - ch) // 2))
+
+    def _page_scale(self) -> float:
+        """
+        Fator que leva a imagem renderizada da página ao tamanho de tela.
+
+        É `ajuste × zoom`, onde o ajuste depende do modo:
+
+          "largura" — a página ocupa toda a largura do canvas e transborda
+                      para baixo; o auto-scroll acompanha a voz. É o padrão
+                      porque é o que entrega o texto no maior tamanho.
+          "pagina"  — a página inteira cabe na tela.
+
+        Antes só existia o modo "pagina", e com ele uma folha retrato num
+        canvas deitado fica limitada pela ALTURA: sobravam tarjas vazias
+        enormes dos dois lados. Medido, a página ficava com 15% a 22% da
+        janela, e o vazio em volta dela chegava a 36% — mais do que a
+        própria página. O livro é o produto; ele precisa do espaço.
+
+        Quatro lugares precisavam desta conta (desenho, conversão de
+        clique para coordenada do PDF, auto-scroll e salto para resultado
+        de busca) e cada um tinha a sua cópia — por isso virou método.
+        """
+        if self._cur_img is None:
+            return 1.0
+        cw = self._canvas.winfo_width()
+        ch = self._canvas.winfo_height()
+        iw, ih = self._cur_img.size
+        if cw < 10 or ch < 10 or not iw or not ih:
+            return 1.0
+        ajuste = cw / iw if self._fit_mode == "largura" else min(cw / iw, ch / ih)
+        return ajuste * self._zoom
+
     def _show_page(self, n: int):
-        """Renderiza e exibe a página n no canvas."""
+        """
+        Renderiza e exibe a página n no canvas.
+
+        Só exibe: quem decide em que página a leitura está é o loop de
+        leitura (ui/controls.py) e os botões de navegação. Este método
+        chegou a atribuir `self.current_page = n`, e isso abria uma
+        corrida — o loop de leitura o agenda com `after(0, ...)`, e numa
+        sequência de páginas quase vazias (folhas de rosto, aberturas de
+        capítulo) o loop avança várias páginas antes de o callback rodar;
+        ao rodar, ele puxava a leitura de volta para uma página já
+        passada. Um callback atrasado agora simplesmente não faz nada.
+        """
         if not self.renderer or not (0 <= n < self.total_pages):
             return
+        if n != self.current_page:
+            return
 
-        self.current_page = n
         self._pan_x = self._pan_y = 0   # reseta pan ao mudar de página
         # Com zoom > 100% (padrão), centralizar verticalmente corta o topo
         # da página — onde o texto normalmente começa — deixando a tela
@@ -202,7 +311,20 @@ class ViewerMixin:
         return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
 
     def _draw_image(self, img: Image.Image):
-        """Exibe a imagem PIL no canvas com os grifos, respeitando zoom e pan."""
+        """
+        Exibe a imagem PIL no canvas com os grifos, respeitando zoom e pan.
+
+        Ordem importa para a performance: a página é redimensionada para o
+        tamanho de tela PRIMEIRO (e o resultado fica em cache), e os grifos
+        são pintados depois, já na escala do canvas.
+
+        A versão anterior compunha os grifos sobre a imagem em tamanho
+        cheio — converter 827x1170 para RGBA, criar um overlay do mesmo
+        tamanho, compor e reduzir com LANCZOS a cada chamada: ~52 ms. Isso
+        não incomodava enquanto o grifo mudava uma vez por trecho, mas
+        agora ele acompanha a voz palavra a palavra (várias vezes por
+        segundo) e esse custo tomaria a thread da interface inteira.
+        """
         if not self._alive:
             return
         cw = self._canvas.winfo_width()
@@ -214,39 +336,10 @@ class ViewerMixin:
         self._cur_img = img   # guarda para redesenhar no zoom/pan
         iw, ih = img.size
 
-        # Aplica Grifos Permanentes e Efêmeros em uma cópia da imagem original
-        img_drawn = img.convert("RGBA")
-        overlay = Image.new("RGBA", img_drawn.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        zoom_pdf = PDF_RENDER_DPI / 72.0
-
-        # Desenha efêmeros (TTS) — respeita opacity individual
-        if self._ephemeral_highlights:
-            for h in self._ephemeral_highlights:
-                r, g, b = self._hex_to_rgb(h.get("color", C["info"]))
-                a = int(h.get("opacity", 0.35) * 255)
-                draw.rectangle(
-                    [h["x0"]*zoom_pdf, h["y0"]*zoom_pdf,
-                     h["x1"]*zoom_pdf, h["y1"]*zoom_pdf],
-                    fill=(r, g, b, a),
-                )
-
-        # Desenha manuais
-        if self.current_path:
-            saved_h = highlights.get(self.current_path, self.current_page + 1)
-            for h in saved_h:
-                r, g, b = self._hex_to_rgb(h.get("color", DEFAULT_HIGHLIGHT_COLOR))
-                a = int(h.get("opacity", 0.35) * 255)
-                draw.rectangle([h["x0"]*zoom_pdf, h["y0"]*zoom_pdf, h["x1"]*zoom_pdf, h["y1"]*zoom_pdf], fill=(r, g, b, a))
-
-        img_drawn.alpha_composite(overlay)
-        base_img = img_drawn.convert("RGB")
-
         # Escala base (zoom=1 → cabe na tela)
-        base_scale = min(cw / iw, ch / ih)
-        scale      = base_scale * self._zoom
-        nw         = int(iw * scale)
-        nh         = int(ih * scale)
+        scale      = self._page_scale()
+        nw         = max(1, int(iw * scale))
+        nh         = max(1, int(ih * scale))
 
         # Primeira renderização de uma página recém-aberta: ancora no topo
         # em vez de centralizar verticalmente (ver _show_page). Sem isso,
@@ -256,15 +349,20 @@ class ViewerMixin:
             self._pan_y = max(0, (nh - ch) // 2)
             self._pan_pending_top = False
 
-        # Limita pan: não deixa imagem sair completamente da tela
-        max_px = max(0, (nw - cw) // 2 + nw // 4)
-        max_py = max(0, (nh - ch) // 2 + nh // 4)
+        max_px, max_py = self._max_pan()
         self._pan_x = max(-max_px, min(max_px, self._pan_x))
         self._pan_y = max(-max_py, min(max_py, self._pan_y))
 
-        resized = base_img.resize((nw, nh), Image.LANCZOS)
+        # Página redimensionada em cache: só refaz o LANCZOS quando muda a
+        # página, o zoom ou o tamanho do canvas — nunca quando só o grifo
+        # andou. A comparação é por identidade do objeto (o renderer
+        # mantém as imagens vivas no seu próprio cache LRU).
+        if self._scaled_src is not img or self._scaled_size != (nw, nh):
+            self._scaled_img  = img.resize((nw, nh), Image.LANCZOS)
+            self._scaled_src  = img
+            self._scaled_size = (nw, nh)
 
-        # Posição central + offset de pan
+        # Posição do canto superior esquerdo da página no canvas
         x = (cw - nw) // 2 + self._pan_x
         y = (ch - nh) // 2 + self._pan_y
 
@@ -273,15 +371,18 @@ class ViewerMixin:
         src_y  = max(0, -y)
         src_x2 = min(nw, src_x + cw)
         src_y2 = min(nh, src_y + ch)
-        cropped = resized.crop((src_x, src_y, src_x2, src_y2))
 
-        dest_x = max(0, x)
-        dest_y = max(0, y)
+        frame = Image.new("RGB", (cw, ch), self._hex_to_rgb(C["canvas_bg"]))
+        if src_x2 > src_x and src_y2 > src_y:
+            frame.paste(
+                self._scaled_img.crop((src_x, src_y, src_x2, src_y2)),
+                (max(0, x), max(0, y)),
+            )
 
-        bg = Image.new("RGB", (cw, ch), (26, 26, 26))
-        bg.paste(cropped, (dest_x, dest_y))
+        # Grifos: de pontos PDF direto para pixels do canvas
+        self._paint_highlights(frame, (PDF_RENDER_DPI / 72.0) * scale, x, y)
 
-        tk_img = ImageTk.PhotoImage(bg)
+        tk_img = ImageTk.PhotoImage(frame)
         self._canvas.delete("all")
         self._canvas.create_image(0, 0, anchor="nw", image=tk_img)
         self._canvas_img_ref = tk_img
@@ -290,7 +391,57 @@ class ViewerMixin:
         self._zoom_lbl.configure(text=f"{int(self._zoom * 100)}%")
 
         # Cursor muda para indicar que pode arrastar quando com zoom
-        self._canvas.configure(cursor="fleur" if self._zoom > 1.01 else "")
+        self._canvas.configure(cursor="fleur" if self._page_overflows() else "")
+
+    def _paint_highlights(self, frame: Image.Image, k: float, ox: int, oy: int):
+        """
+        Pinta grifos efêmeros (leitura) e manuais sobre `frame`, que já
+        está no tamanho do canvas.
+
+        `k` converte pontos PDF em pixels de tela e (ox, oy) é onde o
+        canto da página caiu no canvas. Retângulos fora da área visível
+        são descartados antes de desenhar.
+        """
+        pintar = [(h, h.get("color", C["info"])) for h in self._ephemeral_highlights]
+        if self.current_path:
+            pintar += [(h, h.get("color", DEFAULT_HIGHLIGHT_COLOR))
+                       for h in highlights.get(self.current_path, self.current_page + 1)]
+        if not pintar:
+            return
+
+        cw, ch = frame.size
+        visiveis = []
+        for h, color in pintar:
+            x0 = h["x0"] * k + ox
+            y0 = h["y0"] * k + oy
+            x1 = h["x1"] * k + ox
+            y1 = h["y1"] * k + oy
+            if x1 < 0 or y1 < 0 or x0 > cw or y0 > ch:
+                continue
+            visiveis.append((x0, y0, x1, y1, color, h.get("opacity", 0.35)))
+        if not visiveis:
+            return
+
+        # O overlay cobre só a área dos grifos, não o canvas inteiro:
+        # durante a leitura o grifo da palavra ocupa uns poucos milhares
+        # de pixels, e alocar meio megapixel a cada palavra era o maior
+        # custo restante do redesenho.
+        bx0 = max(0, int(min(v[0] for v in visiveis)))
+        by0 = max(0, int(min(v[1] for v in visiveis)))
+        bx1 = min(cw, int(max(v[2] for v in visiveis)) + 1)
+        by1 = min(ch, int(max(v[3] for v in visiveis)) + 1)
+        if bx1 <= bx0 or by1 <= by0:
+            return
+
+        overlay = Image.new("RGBA", (bx1 - bx0, by1 - by0), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        for x0, y0, x1, y1, color, opacity in visiveis:
+            r, g, b = self._hex_to_rgb(color)
+            draw.rectangle([x0 - bx0, y0 - by0, x1 - bx0, y1 - by0],
+                           fill=(r, g, b, int(opacity * 255)))
+
+        # RGBA como própria máscara = composição alpha sobre o RGB
+        frame.paste(overlay, (bx0, by0), overlay)
 
     def _zoom_in(self):
         self._zoom = min(self._zoom_max, round(self._zoom + 0.25, 2))
@@ -299,16 +450,38 @@ class ViewerMixin:
 
     def _zoom_out(self):
         self._zoom = max(self._zoom_min, round(self._zoom - 0.25, 2))
-        if self._zoom <= 1.0:
-            self._pan_x = self._pan_y = 0
+        self._pan_x = 0
         prefs.set_value("zoom", self._zoom)
         self._redraw()
 
     def _zoom_reset(self):
+        """Volta ao ajuste puro, sem zoom extra (atalho Ctrl+0)."""
         self._zoom  = 1.0
-        self._pan_x = self._pan_y = 0
+        self._pan_x = 0
+        self._pan_y = 0
+        self._pan_pending_top = True
         prefs.set_value("zoom", self._zoom)
         self._redraw()
+
+    def _toggle_fit_mode(self):
+        """Alterna largura ⇄ página inteira e volta o zoom a 1.0."""
+        self._fit_mode = "pagina" if self._fit_mode == "largura" else "largura"
+        prefs.set_value("fit_mode", self._fit_mode)
+        self._update_fit_btn()
+        self._zoom_reset()
+
+    def _update_fit_btn(self):
+        self._fit_btn.label.configure(
+            text="LARGURA" if self._fit_mode == "largura" else "PÁGINA")
+
+    def _page_overflows(self) -> bool:
+        """True quando a página não cabe inteira na altura do canvas —
+        ou seja, quando há o que rolar. É o que decide se a roda do mouse
+        rola a página ou passa para a próxima."""
+        if self._cur_img is None:
+            return False
+        _iw, ih = self._cur_img.size
+        return ih * self._page_scale() > self._canvas.winfo_height() + 2
 
     # Máscara do bit "Control" no state de eventos do Tkinter (Windows/X11)
     _CONTROL_MASK = 0x0004
@@ -323,9 +496,25 @@ class ViewerMixin:
         está com zoom ativo, faz pan vertical; se está no tamanho de
         ajuste (100%), passa para a página anterior/seguinte.
         """
-        # Windows: event.delta (+120 / -120), Linux: Button-4/5
-        scroll_up = event.num == 4 or (hasattr(event, "delta") and event.delta > 0)
         ctrl_held = bool(event.state & self._CONTROL_MASK)
+
+        # Windows manda event.delta em múltiplos de 120 ("um clique" da
+        # roda), mas touchpads de precisão mandam valores bem menores e
+        # muito mais vezes. Tratar cada evento como um clique fazia o
+        # touchpad virar várias páginas — e cada virada reinicia a
+        # leitura — com um movimento mínimo do dedo. Acumular o delta e
+        # só agir a cada 120 resolve; no Linux (Button-4/5) não há delta,
+        # então cada evento vale um clique inteiro.
+        if event.num in (4, 5):
+            cliques = 1 if event.num == 4 else -1
+        else:
+            self._wheel_accum += getattr(event, "delta", 0)
+            cliques = int(self._wheel_accum / 120)
+            if not cliques:
+                return
+            self._wheel_accum -= cliques * 120
+
+        scroll_up = cliques > 0
 
         if ctrl_held:
             if scroll_up:
@@ -334,14 +523,17 @@ class ViewerMixin:
                 self._zoom_out()
             return
 
-        if self._zoom > 1.01:
-            self._pan_y += 60 if scroll_up else -60
+        # Antes a condição era `zoom > 1.01`. Com o ajuste por largura a
+        # página transborda para baixo mesmo com zoom 1.0, e a roda
+        # virava página em vez de rolar o texto — exatamente no modo em
+        # que rolar é o gesto esperado.
+        if self._page_overflows():
+            self._pan_y += 60 * cliques
             self._redraw()
+        elif scroll_up:
+            self._prev_page()
         else:
-            if scroll_up:
-                self._prev_page()
-            else:
-                self._next_page()
+            self._next_page()
 
     def _on_canvas_press(self, event):
         if self._hl_mode:
@@ -364,11 +556,11 @@ class ViewerMixin:
     def _on_pan_start(self, event):
         self._press_x = event.x
         self._press_y = event.y
-        if self._zoom > 1.01:
+        if self._page_overflows():
             self._pan_start = (event.x - self._pan_x, event.y - self._pan_y)
 
     def _on_pan_move(self, event):
-        if self._pan_start and self._zoom > 1.01:
+        if self._pan_start and self._page_overflows():
             self._pan_x = event.x - self._pan_start[0]
             self._pan_y = event.y - self._pan_start[1]
             self._redraw()
@@ -396,8 +588,7 @@ class ViewerMixin:
         cw = self._canvas.winfo_width()
         ch = self._canvas.winfo_height()
         iw, ih = self._cur_img.size
-        base_scale = min(cw / iw, ch / ih)
-        scale      = base_scale * self._zoom
+        scale      = self._page_scale()
         nw = int(iw * scale)
         nh = int(ih * scale)
         # Posição do canto superior esquerdo da imagem no canvas
@@ -523,11 +714,9 @@ class ViewerMixin:
         zoom_pdf = PDF_RENDER_DPI / 72.0
         y_center_pdf = (bbox["y0"] + bbox["y1"]) / 2.0
         if self._cur_img:
-            cw = self._canvas.winfo_width()
             ch = self._canvas.winfo_height()
-            iw, ih = self._cur_img.size
-            base_scale = min(cw / iw, ch / ih)
-            scale = base_scale * self._zoom
+            _iw, ih = self._cur_img.size
+            scale = self._page_scale()
             y_on_canvas = (ch - ih * scale) / 2 + y_center_pdf * zoom_pdf * scale
             self._pan_y = int(ch / 2 - y_on_canvas)
         self._redraw()

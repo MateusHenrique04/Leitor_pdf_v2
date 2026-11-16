@@ -1,6 +1,30 @@
 # Proposta: grifo sincronizado sem busca textual
 
-**Status:** aguardando aprovação — não implementar sem decisão do autor.
+**Status:** IMPLEMENTADA — ver `core/word_sync.py` e
+`PDFRenderer.word_rects()`.
+
+A solução adotada chega ao mesmo resultado por um caminho um pouco
+diferente do proposto abaixo. Em vez de **gerar o texto do TTS a partir**
+da lista de palavras (guardando o índice de cada uma), `text_for_page`
+continua como está e a lista de palavras é casada **depois**, contra a
+sequência de word-timings que o edge-tts devolve — com um cursor que só
+anda para a frente dentro da página, e uma janela de tolerância para
+palavras que o TTS fala mas que não existem no texto (marcadores de nota,
+siglas soletradas).
+
+Motivo da escolha: preserva `text_for_page` como a única fonte do texto
+lido em voz alta — o reflow de parágrafos, a dehifenização e a remoção de
+cabeçalho/rodapé continuam num lugar só — e não exige que o TTS e o PDF
+concordem palavra a palavra.
+
+Medido numa página real: **98,3% das palavras localizadas**, em 0–4 ms por
+trecho (antes: ~9 ms *por palavra*, e devolvendo a linha inteira em vez do
+retângulo da palavra). `search_text` continua existindo como caminho de
+retorno para quando o TTS não devolve word-timings.
+
+---
+
+*(texto original da proposta abaixo)*
 
 ## Problema
 

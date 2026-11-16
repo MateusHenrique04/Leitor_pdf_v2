@@ -1,7 +1,7 @@
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-exclude = [".venv_check", "build", "dist"]
+exclude = [".venv", ".venv_check", ".venv311", "build", "dist"]
 
 [tool.ruff.lint]
 # Conjunto enxuto de início — erros/pyflakes, imports e bugs comuns.

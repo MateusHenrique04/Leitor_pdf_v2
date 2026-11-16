@@ -228,3 +228,97 @@ def test_text_in_rect_out_of_range_page_returns_empty(sample_pdf_path):
     r = PDFRenderer(sample_pdf_path)
     assert r.text_in_rect(99, 0, 0, 10, 10) == ""
     r.close()
+
+
+# ──────────────────────────────────────────────────────────────────
+# text_for_page — reflow de parágrafos
+# ──────────────────────────────────────────────────────────────────
+
+def test_text_for_page_junta_linhas_quebradas_do_mesmo_paragrafo(tmp_path):
+    """O PDF guarda uma linha visual por "\n". Sem juntar, uma frase que
+    ocupa três linhas virava três requisições de TTS — três pedaços com
+    pausa no meio. text_for_page deve devolver a frase inteira numa linha
+    só."""
+    def build(doc):
+        p = doc.new_page()
+        p.insert_text((72, 72), "Esta frase comeca na primeira linha da")
+        p.insert_text((72, 86), "pagina, continua na segunda linha e so")
+        p.insert_text((72, 100), "termina aqui na terceira.")
+
+    r = PDFRenderer(_save_pdf(tmp_path, "wrap.pdf", build))
+    text = r.text_for_page(0)
+    assert text.count("\n") == 0
+    assert text == ("Esta frase comeca na primeira linha da pagina, "
+                    "continua na segunda linha e so termina aqui na terceira.")
+    r.close()
+
+
+def test_text_for_page_separa_paragrafos_distintos_com_newline(tmp_path):
+    """Um título e o parágrafo seguinte estão longe um do outro na página
+    e devem continuar separados — a pausa entre eles é desejada."""
+    def build(doc):
+        p = doc.new_page()
+        p.insert_text((72, 72), "Titulo do capitulo")
+        p.insert_text((72, 200), "O corpo do texto comeca bem mais abaixo.")
+
+    r = PDFRenderer(_save_pdf(tmp_path, "paras.pdf", build))
+    assert r.text_for_page(0).split("\n") == [
+        "Titulo do capitulo",
+        "O corpo do texto comeca bem mais abaixo.",
+    ]
+    r.close()
+
+
+def test_text_for_page_remove_rodape_que_muda_de_numero(tmp_path):
+    """O rodapé mais comum traz o número da página, então a string é
+    diferente em cada página e a contagem por texto literal nunca batia o
+    limiar: o rodapé escapava e era lido em voz alta a cada virada."""
+    def build(doc):
+        for i in range(5):
+            p = doc.new_page()
+            p.insert_text((72, 72), (
+                f"Conteudo relevante da pagina {i + 1}: uma linha de texto "
+                "corrido com o comprimento tipico de um livro."))
+            p.insert_text((72, 780), f"www.exemplo.com - Pagina {i + 1}")
+
+    r = PDFRenderer(_save_pdf(tmp_path, "rodape.pdf", build))
+    for i in range(5):
+        text = r.text_for_page(i)
+        assert "www.exemplo.com" not in text
+        assert f"pagina {i + 1}" in text
+    r.close()
+
+
+# ──────────────────────────────────────────────────────────────────
+# word_rects — base do grifo que acompanha a voz
+# ──────────────────────────────────────────────────────────────────
+
+def test_word_rects_devolve_palavras_normalizadas_em_ordem(sample_pdf_path):
+    r = PDFRenderer(sample_pdf_path)
+    words = r.word_rects(0)
+    nomes = [w for w, _ in words]
+    assert nomes[:3] == ["capitulo", "um", "o"]
+    # a pontuação some na normalização (casa com o texto do TTS)
+    assert "telhado" in nomes
+    assert all(set(rect) == {"x0", "y0", "x1", "y1"} for _, rect in words)
+    r.close()
+
+
+def test_word_rects_retangulo_e_da_palavra_e_nao_da_linha(sample_pdf_path):
+    """O ponto da mudança: search_text casa por âncora e devolve a LINHA
+    inteira; aqui cada palavra tem o seu próprio retângulo, estreito."""
+    r = PDFRenderer(sample_pdf_path)
+    rects = dict(r.word_rects(0))
+    linha = r.search_text(0, "O gato preto dormia tranquilo sobre o telhado quente.")
+    largura_palavra = rects["gato"]["x1"] - rects["gato"]["x0"]
+    largura_linha = linha[0]["x1"] - linha[0]["x0"]
+    assert largura_palavra < largura_linha / 3
+    r.close()
+
+
+def test_word_rects_fora_do_intervalo_e_apos_close(sample_pdf_path):
+    r = PDFRenderer(sample_pdf_path)
+    assert r.word_rects(99) == []
+    assert r.word_rects(-1) == []
+    r.close()
+    assert r.word_rects(0) == []
