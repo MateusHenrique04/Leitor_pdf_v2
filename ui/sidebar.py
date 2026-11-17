@@ -1,296 +1,187 @@
-import logging
+"""ui/sidebar.py — barra lateral: logo, abrir PDF e biblioteca."""
+from __future__ import annotations
+
 import os
-import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox
 
-import customtkinter as ctk
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
-import data.highlights as highlights
-import data.library as lib
-from config import FONTS, C
-from core.duration import BookTimeline
-from core.pdf_renderer import PDFOpenError, PDFRenderer
-from ui.widgets import flat_button
+from config import C
+from ui.icons import icon
+from ui.widgets import ElidedLabel
 
-log = logging.getLogger(__name__)
+SIDEBAR_WIDTH = 236
 
-class SidebarMixin:
-    def _build_sidebar(self):
-        sb = tk.Frame(self, bg=C["panel"], width=220)
-        sb.grid(row=0, column=0, sticky="nsew")
-        sb.grid_propagate(False)
-        self._sidebar_frame = sb   # escondido/mostrado pelo modo leitura
+
+class _BookRow(QFrame):
+    open_requested = Signal(str)
+    remove_requested = Signal(str)
+
+    def __init__(self, path: str, meta: dict, parent=None):
+        super().__init__(parent)
+        self.setObjectName("bookRow")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._path = path
+
+        total = meta.get("total_pages", 0)
+        last = meta.get("last_page", 0)
+        pct = (last / total) if total > 0 else 0.0
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 6, 8)
+        lay.setSpacing(5)
+
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        name = ElidedLabel(os.path.basename(path))
+        name.setObjectName("bookName")
+        pct_lbl = QLabel(f"{int(pct * 100)}%")
+        pct_lbl.setObjectName("bookPct")
+        rm = QToolButton()
+        rm.setObjectName("removeBook")
+        rm.setIcon(icon("close", C["text_dim"]))
+        rm.setIconSize(QSize(12, 12))
+        rm.setToolTip("Remover da biblioteca")
+        rm.setCursor(Qt.CursorShape.PointingHandCursor)
+        rm.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rm.clicked.connect(lambda: self.remove_requested.emit(self._path))
+        top.addWidget(name, 1)
+        top.addWidget(pct_lbl)
+        top.addWidget(rm)
+        lay.addLayout(top)
+
+        bar = QProgressBar()
+        bar.setObjectName("bookProgress")
+        bar.setRange(0, 1000)
+        bar.setValue(int(pct * 1000))
+        bar.setTextVisible(False)
+        lay.addWidget(bar)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.open_requested.emit(self._path)
+
+
+class Sidebar(QWidget):
+    open_clicked = Signal()
+    book_selected = Signal(str)
+    book_removed = Signal(str)
+    tab_changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("sidebar")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedWidth(SIDEBAR_WIDTH)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
         # Logo
-        logo = tk.Frame(sb, bg=C["panel"])
-        logo.pack(fill="x", pady=(24, 0))
-        tk.Frame(logo, bg=C["red"], width=3, height=32).place(x=20, y=4)
-        tk.Label(logo, text="LECTOR", font=FONTS["logo"],
-                 bg=C["panel"], fg=C["text"]).pack(padx=(30, 0), anchor="w")
-        tk.Label(logo, text="pdf audiobook", font=FONTS["label"],
-                 bg=C["panel"], fg=C["text_dim"]).pack(padx=(31, 0), anchor="w", pady=(2, 16))
+        logo = QHBoxLayout()
+        logo.setContentsMargins(20, 24, 20, 18)
+        logo.setSpacing(10)
+        bar = QFrame()
+        bar.setObjectName("accentBar")
+        bar.setFixedSize(3, 34)
+        text = QVBoxLayout()
+        text.setSpacing(0)
+        name = QLabel("LECTOR")
+        name.setObjectName("logo")
+        tag = QLabel("pdf audiobook")
+        tag.setObjectName("tagline")
+        text.addWidget(name)
+        text.addWidget(tag)
+        logo.addWidget(bar)
+        logo.addLayout(text)
+        logo.addStretch(1)
+        root.addLayout(logo)
 
-        tk.Frame(sb, bg=C["border"], height=1).pack(fill="x")
+        sep = QFrame()
+        sep.setObjectName("separator")
+        sep.setFixedHeight(1)
+        root.addWidget(sep)
 
-        # Botão adicionar (Ctrl+O também abre)
-        add = flat_button(
-            sb, "＋  Abrir PDF", self._open_file,
-            font=FONTS["body_bold"], bg=C["red"], fg=C["on_accent"], hover_bg=C["red_hot"],
-        )
-        add.pack(fill="x", padx=16, pady=14)
+        # Abrir PDF
+        add = QPushButton("  Abrir PDF")
+        add.setObjectName("primary")
+        add.setIcon(icon("plus", C["on_accent"]))
+        add.setIconSize(QSize(16, 16))
+        add.setCursor(Qt.CursorShape.PointingHandCursor)
+        add.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        add.setToolTip("Abrir PDF  (Ctrl+O)")
+        add.clicked.connect(self.open_clicked)
+        holder = QVBoxLayout()
+        holder.setContentsMargins(16, 14, 16, 12)
+        holder.addWidget(add)
+        root.addLayout(holder)
 
-        tk.Frame(sb, bg=C["border"], height=1).pack(fill="x")
+        # Abas Lendo / Lidos (controle segmentado)
+        seg = QFrame()
+        seg.setObjectName("segmented")
+        seg_lay = QHBoxLayout(seg)
+        seg_lay.setContentsMargins(3, 3, 3, 3)
+        seg_lay.setSpacing(2)
+        self._tab_group = QButtonGroup(self)
+        self._tab_group.setExclusive(True)
+        self._tabs: dict[str, QPushButton] = {}
+        for label in ("Lendo", "Lidos"):
+            b = QPushButton(label)
+            b.setObjectName("seg")
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self._tab_group.addButton(b)
+            seg_lay.addWidget(b, 1)
+            self._tabs[label] = b
+        self._tabs["Lendo"].setChecked(True)
+        self._tab_group.buttonClicked.connect(lambda _b: self.tab_changed.emit())
+        seg_holder = QVBoxLayout()
+        seg_holder.setContentsMargins(16, 0, 16, 8)
+        seg_holder.addWidget(seg)
+        root.addLayout(seg_holder)
 
-        # Abas de livros
-        seg_btn = ctk.CTkSegmentedButton(
-            sb,
-            values=["Lendo", "Lidos"],
-            variable=self._lib_tab_var,
-            command=lambda _: self._refresh_lib(),
-            fg_color=C["border"],
-            selected_color=C["red"],
-            selected_hover_color=C["red_hot"],
-            text_color=C["text_dim"],
-            unselected_color=C["panel"],
-            unselected_hover_color=C["hover"]
-        )
-        seg_btn.pack(fill="x", padx=16, pady=(14, 8))
+        # Lista de livros
+        self._list = QWidget()
+        self._list_lay = QVBoxLayout(self._list)
+        self._list_lay.setContentsMargins(8, 0, 8, 12)
+        self._list_lay.setSpacing(2)
+        self._list_lay.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(self._list)
+        root.addWidget(scroll, 1)
 
-        scroll_container = ctk.CTkScrollableFrame(
-            sb,
-            fg_color=C["panel"],
-            scrollbar_button_color=C["border"],
-            scrollbar_button_hover_color=C["text_dim"],
-        )
-        scroll_container.pack(fill="both", expand=True, padx=0, pady=0)
-        self._lib_frame = scroll_container
+    def current_tab(self) -> str:
+        return "Lidos" if self._tabs["Lidos"].isChecked() else "Lendo"
 
-    def _refresh_lib(self):
-        for w in self._lib_frame.winfo_children():
-            w.destroy()
-
-        is_finished_tab = (self._lib_tab_var.get() == "Lidos")
-
-        books = {p: v for p, v in lib.all_books().items()
-                 if os.path.exists(p) and v.get("finished", False) == is_finished_tab}
-
+    def set_books(self, books: list[tuple[str, dict]]):
+        # Esvazia (mantém o stretch final)
+        while self._list_lay.count() > 1:
+            item = self._list_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
         if not books:
-            tk.Label(self._lib_frame, text="Nenhum livro.",
-                     font=("Courier", 8), bg=C["panel"],
-                     fg=C["text_dim"]).pack(pady=10, padx=18, anchor="w")
+            empty = QLabel("Nenhum livro.")
+            empty.setObjectName("muted")
+            empty.setContentsMargins(12, 8, 0, 0)
+            self._list_lay.insertWidget(0, empty)
             return
-        for path, meta in books.items():
-            name = os.path.basename(path)
-            disp = name[:22] + "…" if len(name) > 23 else name
-            outer = tk.Frame(self._lib_frame, bg=C["panel"])
-            outer.pack(fill="x")
-            row  = tk.Frame(outer, bg=C["panel"], cursor="hand2")
-            row.pack(fill="x")
-            dot = tk.Label(row, text="▸", font=("Courier", 9),
-                           bg=C["panel"], fg=C["red_text"], padx=10)
-            dot.pack(side="left")
-            lbl = tk.Label(row, text=disp, font=("Georgia", 10),
-                           bg=C["panel"], fg=C["text_soft"],
-                           anchor="w", pady=6)
-            lbl.pack(side="left", fill="x", expand=True)
-
-            # Barra de progresso
-            total = meta.get("total_pages", 0)
-            last  = meta.get("last_page", 0)
-            pct   = (last / total) if total > 0 else 0.0
-            pct_txt = f"{int(pct*100)}%"
-            prog_bg = tk.Frame(outer, bg=C["border"], height=2)
-            prog_bg.pack(fill="x", padx=0)
-            prog_fill = tk.Frame(prog_bg, bg=C["red"], height=2)
-            prog_fill.place(relwidth=pct, relheight=1.0)
-            pct_lbl = tk.Label(outer, text=pct_txt,
-                               font=("Courier", 7), bg=C["panel"],
-                               fg=C["text_dim"], anchor="e", padx=10)
-            pct_lbl.pack(fill="x")
-
-            # Botão remover (×) — fica discreto, vermelho no hover
-            btn_rm = tk.Label(row, text="×", font=("Georgia", 13, "bold"),
-                              bg=C["panel"], fg=C["text_dim"],
-                              padx=8, pady=4, cursor="hand2")
-            btn_rm.pack(side="right")
-
-            def _open(p=path):
-                self._load_book(p)
-
-            def _remove(p=path):
-                self._remove_book(p)
-
-            def _on(e, r=row, d=dot, lb=lbl, o=outer, pl=pct_lbl, b=btn_rm):
-                for w in (r, d, lb, o, pl, b):
-                    w.configure(bg=C["panel_alt"])
-                b.configure(fg=C["red_text"])
-
-            def _off(e, r=row, d=dot, lb=lbl, o=outer, pl=pct_lbl, b=btn_rm):
-                for w in (r, d, lb, o, pl, b):
-                    w.configure(bg=C["panel"])
-                b.configure(fg=C["text_dim"])
-
-            for w in (outer, row, dot, lbl, pct_lbl):
-                w.bind("<Button-1>", lambda e, fn=_open: fn())
-                w.bind("<Enter>", _on)
-                w.bind("<Leave>", _off)
-
-            btn_rm.bind("<Button-1>", lambda e, fn=_remove: fn())
-            btn_rm.bind("<Enter>", _on)
-            btn_rm.bind("<Leave>", _off)
-
-    def _remove_book(self, path: str):
-        """Remove o livro da biblioteca após confirmação."""
-        name = os.path.basename(path)
-        ok = messagebox.askyesno(
-            "Remover livro",
-            f'Remover "{name}" da biblioteca?\n\nO arquivo PDF não será apagado.',
-            icon="warning",
-        )
-        if not ok:
-            return
-
-        # Se o livro removido estiver aberto, limpa a tela
-        if self.current_path == path:
-            self._stop_read_loop()
-            self.player.stop()
-            if self.renderer:
-                self.renderer.close()
-                self.renderer = None
-            self.current_path = None
-            self._timeline = None
-            self._reading_pos = None
-            self._anchor_seconds = 0.0
-            self._seek_bar.set_enabled(False)
-            self._title_lbl.configure(text="Nenhum livro aberto")
-            self._page_lbl.configure(text="")
-            self._canvas.delete("all")
-            self._canvas_img_ref = None
-
-        lib.remove(path)
-        highlights.clear_book(path)
-        self._refresh_lib()
-
-    def _open_file(self):
-        if self._focus_active:
-            self._focus_blocked_feedback()
-            return
-        path = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
-        if not path:
-            return
-        lib.add(path)
-        self._load_book(path)
-        self._refresh_lib()
-
-    def _load_book(self, path: str):
-        """
-        Troca de livro. Abrir um PDF (PDFRenderer.__init__) pode ser lento
-        em livros grandes — varre todas as páginas para detectar
-        cabeçalho/rodapé — então roda em uma thread de background e nunca
-        trava a UI. Também nunca deixa `current_path` apontando para um
-        livro que falhou ao abrir (estado inconsistente da versão anterior).
-        """
-        # Bloqueia troca de livro durante o modo foco
-        if self._focus_active and path != self.current_path:
-            self._focus_blocked_feedback()
-            return
-        # Para tudo que estava rodando
-        self._stop_read_loop()
-        self.player.stop()
-        if self.renderer:
-            self.renderer.close()
-            self.renderer = None
-        self.current_path = None
-
-        name = os.path.basename(path)
-        disp_name = name[:50] + "…" if len(name) > 50 else name
-        self._title_lbl.configure(text=f"Abrindo {disp_name}…")
-        self._page_lbl.configure(text="")
-        self._canvas.delete("all")
-        self._canvas_img_ref = None
-
-        threading.Thread(
-            target=self._open_book_bg, args=(path,), daemon=True,
-        ).start()
-
-    def _open_book_bg(self, path: str):
-        """Roda em background: abre o PDF (fitz.open + varredura de
-        cabeçalho/rodapé) e agenda o resultado (sucesso ou erro) na UI."""
-        try:
-            renderer = PDFRenderer(path)
-        except PDFOpenError as e:
-            # `e` é apagado pelo Python ao sair do bloco `except`, então
-            # precisa virar uma variável local antes do self.after diferido
-            # capturá-la na lambda — senão vira NameError quando o
-            # callback roda de fato.
-            msg = str(e)
-            log.warning("Não foi possível abrir %r: %s", path, msg)
-            if self._alive:
-                self.after(0, lambda: self._on_book_open_failed(path, msg))
-            return
-        except Exception as e:
-            msg = str(e)
-            log.error("Erro inesperado ao abrir %r: %s", path, msg)
-            if self._alive:
-                self.after(0, lambda: self._on_book_open_failed(path, msg))
-            return
-        if self._alive:
-            self.after(0, lambda: self._on_book_opened(path, renderer))
-
-    def _on_book_open_failed(self, path: str, error_msg: str):
-        """Chamado na UI thread quando a abertura do PDF falha — mostra um
-        erro claro em vez de travar/deixar o app num estado inconsistente."""
-        self._title_lbl.configure(text="Nenhum livro aberto")
-        name = os.path.basename(path)
-        messagebox.showerror(
-            "Não foi possível abrir o PDF",
-            f'Não foi possível abrir "{name}".\n\n{error_msg}',
-        )
-
-    def _on_book_opened(self, path: str, renderer: PDFRenderer):
-        """Chamado na UI thread quando o PDF abriu com sucesso."""
-        self.current_path = path
-        self.renderer      = renderer
-        self.total_pages   = renderer.total
-
-        book_meta = lib.get(path)
-        self.current_page = book_meta.get("last_page", 0)
-        self.current_chunk_idx = book_meta.get("last_chunk_idx", 0)
-
-        lib.save_total(path, self.total_pages)
-
-        # Linha do tempo do audiolivro. page_lengths sai de graça da
-        # varredura que o PDFRenderer já faz ao abrir o arquivo.
-        self._timeline = BookTimeline(renderer.page_lengths, speed_pct=self._speed)
-        self._reading_pos = None
-        self._publish_position()
-        self._seek_bar.set_enabled(self._timeline.total_chars > 0)
-
-        # Atualiza UI
-        name = os.path.basename(path)
-        self._title_lbl.configure(text=name[:50] + "…" if len(name) > 50 else name)
-        self._prog_slider.configure(from_=1, to=self.total_pages)
-        self._prog_var.set(self.current_page + 1)
-        self._update_finished_btn()
-
-        self._show_page(self.current_page)
-
-        # Inicia o loop de leitura
-        self._start_read_loop()
-
-    def _toggle_finished(self):
-        if not self.current_path:
-            return
-        is_fin = lib.is_finished(self.current_path)
-        lib.mark_finished(self.current_path, not is_fin)
-        self._update_finished_btn()
-        self._refresh_lib()
-
-    def _update_finished_btn(self):
-        if not self.current_path or not hasattr(self, '_btn_mark_finished'):
-            return
-        if lib.is_finished(self.current_path):
-            self._btn_mark_finished.configure(text="📖 Marcar Não Lido", text_color=C["red_text"])
-        else:
-            self._btn_mark_finished.configure(text="✅ Marcar Lido", text_color=C["text_dim"])
+        for i, (path, meta) in enumerate(books):
+            row = _BookRow(path, meta)
+            row.open_requested.connect(self.book_selected)
+            row.remove_requested.connect(self.book_removed)
+            self._list_lay.insertWidget(i, row)

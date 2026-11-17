@@ -1,250 +1,227 @@
 """
-ui/widgets.py — componentes reutilizáveis para reduzir a duplicação de
-"botão falso" (tk.Frame + tk.Label com hover/clique bindados manualmente)
-que se repetia em quase todo arquivo de ui/ (controls.py, dict_popup.py,
-focus_dialog.py, sidebar.py, viewer.py...).
-
-Uso:
-    from ui.widgets import flat_button
-    btn = flat_button(parent, "▶", self._toggle_play, bg=C["red"], hover_bg=C["red_hot"])
-    btn.pack(...)
-    btn.label.configure(text="⏸")   # trocar o texto depois, se precisar
+ui/widgets.py — componentes reutilizáveis da interface Qt.
 """
-import tkinter as tk
+from __future__ import annotations
 
-from config import FONTS, C
+from PySide6.QtCore import QPoint, QSize, Qt, Signal
+from PySide6.QtGui import QAction, QActionGroup, QPainter
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QPushButton,
+    QSizePolicy,
+    QSlider,
+    QStyle,
+    QStyleOptionSlider,
+    QVBoxLayout,
+    QWidget,
+)
 
-# Folga nas pontas da SeekBar para o marcador redondo não ser cortado.
-_SEEK_MARGIN = 6
-
-
-def flat_button(
-    parent,
-    text: str,
-    command,
-    *,
-    font=("Georgia", 13),
-    bg: str | None = None,
-    fg: str | None = None,
-    hover_bg: str = C["hover"],
-    width: int | None = None,
-    height: int | None = None,
-    padx: int = 10,
-    pady: int = 6,
-) -> tk.Frame:
-    """
-    Cria um "botão" leve baseado em Frame+Label com hover, no estilo já
-    usado no app. Retorna o Frame (com um atributo extra `.label`, para
-    trocar texto/cor depois) — chame .pack()/.grid()/.place() nele.
-
-    Se `width`/`height` forem passados, o botão tem tamanho fixo (ex.:
-    ícones circulares/quadrados de transporte); caso contrário, o
-    tamanho é definido pelo texto + padx/pady (ex.: botões de texto).
-    """
-    bg = bg or C["border"]
-    fg = fg or C["text_dim"]
-    fixed_size = width is not None or height is not None
-
-    frame_kwargs = {}
-    if width is not None:
-        frame_kwargs["width"] = width
-    if height is not None:
-        frame_kwargs["height"] = height
-    frame = tk.Frame(parent, bg=bg, cursor="hand2", **frame_kwargs)
-    if fixed_size:
-        frame.pack_propagate(False)
-
-    label = tk.Label(
-        frame, text=text, font=font, bg=bg, fg=fg,
-        padx=0 if fixed_size else padx,
-        pady=0 if fixed_size else pady,
-    )
-    if fixed_size:
-        label.place(relx=0.5, rely=0.5, anchor="center")
-    else:
-        label.pack()
-
-    def _on_click(_e):
-        command()
-
-    def _on_enter(_e):
-        frame.configure(bg=hover_bg)
-        label.configure(bg=hover_bg)
-
-    def _on_leave(_e):
-        frame.configure(bg=bg)
-        label.configure(bg=bg)
-
-    for w in (frame, label):
-        w.bind("<Button-1>", _on_click)
-        w.bind("<Enter>", _on_enter)
-        w.bind("<Leave>", _on_leave)
-
-    frame.label = label
-    return frame
+from config import C
+from ui.icons import icon
 
 
-class SeekBar(tk.Canvas):
-    """
-    Barra de progresso clicável e arrastável.
+class ClickSlider(QSlider):
+    """Slider horizontal em que um clique na barra pula direto para o ponto
+    clicado (o QSlider padrão só avança uma "página" por vez) e que avisa
+    `committed` só quando o usuário solta — arrastar não dispara um seek a
+    cada pixel, e o valor mexido por código (a leitura andando) nunca
+    dispara nada."""
 
-    Por que não um `tk.Scale`: no Scale, clicar no meio da trilha avança
-    um "passo" na direção do clique em vez de saltar para o ponto
-    clicado — ou seja, não dá para pular para um minuto específico com um
-    clique só, que é justamente o uso aqui.
+    committed = Signal(int)
 
-    `on_seek(fracao)` é chamado ao SOLTAR o botão, com um valor de 0 a 1.
-    Enquanto o usuário arrasta, a barra se move sozinha e `set_fraction`
-    é ignorado, para a posição da leitura não brigar com o dedo dele.
-    """
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-    def __init__(self, parent, on_seek, *, width=260, height=16,
-                 track=None, fill=None, knob=None):
-        super().__init__(parent, width=width, height=height,
-                         bg=parent["bg"], highlightthickness=0, bd=0,
-                         cursor="hand2")
-        self._on_seek = on_seek
-        self._fraction = 0.0
-        self._dragging = False
-        self._track_color = track or C["border"]
-        self._fill_color = fill or C["red"]
-        self._knob_color = knob or C["red_hot"]
-        self._enabled = False
+    def _value_at(self, x: float) -> int:
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        style = self.style()
+        groove = style.subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self)
+        handle = style.subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, self)
+        span = max(1, groove.width() - handle.width())
+        pos = int(x) - groove.x() - handle.width() // 2
+        return QStyle.sliderValueFromPosition(
+            self.minimum(), self.maximum(), max(0, min(span, pos)), span)
 
-        self.bind("<Configure>", lambda _e: self._redraw())
-        self.bind("<Button-1>", self._on_press)
-        self.bind("<B1-Motion>", self._on_drag)
-        self.bind("<ButtonRelease-1>", self._on_release)
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self.setSliderDown(True)
+            self.setValue(self._value_at(event.position().x()))
+            event.accept()
+        else:
+            super().mousePressEvent(event)
 
-    # ── estado ────────────────────────────────────────────────────
+    def mouseMoveEvent(self, event):
+        if self.isSliderDown():
+            self.setValue(self._value_at(event.position().x()))
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
 
-    def set_enabled(self, enabled: bool):
-        """Desligada enquanto não há livro aberto — nem desenha o
-        preenchimento nem responde a cliques."""
-        self._enabled = enabled
-        self.configure(cursor="hand2" if enabled else "")
-        self._redraw()
+    def mouseReleaseEvent(self, event):
+        if self.isSliderDown():
+            self.setSliderDown(False)
+            self.committed.emit(self.value())
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
 
-    def set_fraction(self, fraction: float):
-        if self._dragging:
+
+class ElidedLabel(QLabel):
+    """QLabel que corta o texto com "…" quando não cabe, em vez de forçar a
+    largura do painel. O texto completo vai para a dica (tooltip)."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._full = text
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 (API do Qt)
+        self._full = text
+        self.setToolTip(text)
+        self._elide()
+
+    def _elide(self) -> None:
+        shown = self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideRight, max(10, self.width()))
+        QLabel.setText(self, shown)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
+
+
+class MenuButton(QPushButton):
+    """Botão que abre um menu de opções exclusivas (substitui o dropdown
+    feito à mão com Frame+Label). Mostra a opção atual e um chevron."""
+
+    changed = Signal(int)
+
+    def __init__(self, items: list[str], parent=None):
+        super().__init__(parent)
+        self.setObjectName("menuButton")
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._menu = QMenu(self)
+        self._group = QActionGroup(self)
+        self._group.setExclusive(True)
+        self._actions: list[QAction] = []
+        self._chev = icon("chev_down", C["red_text"]).pixmap(QSize(14, 14))
+        for i, label in enumerate(items):
+            act = self._menu.addAction(str(label))
+            act.setCheckable(True)
+            self._group.addAction(act)
+            act.triggered.connect(lambda _=False, idx=i: self.set_index(idx, emit=True))
+            self._actions.append(act)
+        self._index = -1
+        self.clicked.connect(self._open_menu)
+
+    def set_item_icon(self, idx: int, ic) -> None:
+        self._actions[idx].setIcon(ic)
+
+    def index(self) -> int:
+        return self._index
+
+    def set_index(self, idx: int, emit: bool = False) -> None:
+        if not (0 <= idx < len(self._actions)):
             return
-        fraction = max(0.0, min(1.0, fraction))
-        if abs(fraction - self._fraction) < 1e-4:
-            return
-        self._fraction = fraction
-        self._redraw()
+        self._index = idx
+        self._actions[idx].setChecked(True)
+        self.setText(self._actions[idx].text())
+        if emit:
+            self.changed.emit(idx)
 
-    # ── interação ─────────────────────────────────────────────────
+    def _open_menu(self):
+        self._menu.setMinimumWidth(self.width())
+        self._menu.exec(self.mapToGlobal(QPoint(0, self.height() + 3)))
 
-    def _fraction_at(self, x: int) -> float:
-        largura = max(1, self.winfo_width() - 2 * _SEEK_MARGIN)
-        return max(0.0, min(1.0, (x - _SEEK_MARGIN) / largura))
-
-    def _on_press(self, event):
-        if not self._enabled:
-            return
-        self._dragging = True
-        self._fraction = self._fraction_at(event.x)
-        self._redraw()
-
-    def _on_drag(self, event):
-        if not self._dragging:
-            return
-        self._fraction = self._fraction_at(event.x)
-        self._redraw()
-
-    def _on_release(self, event):
-        if not self._dragging:
-            return
-        self._dragging = False
-        self._fraction = self._fraction_at(event.x)
-        self._redraw()
-        self._on_seek(self._fraction)
-
-    # ── desenho ───────────────────────────────────────────────────
-
-    def _redraw(self):
-        self.delete("all")
-        largura = self.winfo_width()
-        altura = self.winfo_height()
-        if largura <= 1 or altura <= 1:
-            return
-        y = altura // 2
-        x0, x1 = _SEEK_MARGIN, largura - _SEEK_MARGIN
-        self.create_rectangle(x0, y - 2, x1, y + 2,
-                              fill=self._track_color, outline="")
-        if not self._enabled:
-            return
-        xf = x0 + (x1 - x0) * self._fraction
-        if xf > x0:
-            self.create_rectangle(x0, y - 2, xf, y + 2,
-                                  fill=self._fill_color, outline="")
-        raio = 5 if self._dragging else 4
-        self.create_oval(xf - raio, y - raio, xf + raio, y + raio,
-                         fill=self._knob_color, outline="")
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        dpr = self._chev.devicePixelRatio() or 1.0
+        w, h = self._chev.width() / dpr, self._chev.height() / dpr
+        p.drawPixmap(int(self.width() - w - 10), int((self.height() - h) / 2), self._chev)
+        p.end()
 
 
-class CollapsibleSection(tk.Frame):
-    """
-    Seção com cabeçalho clicável que mostra ou esconde o seu conteúdo.
+class _SectionHeader(QWidget):
+    """Cabeçalho clicável: título à esquerda, chevron à direita."""
 
-    Existe porque o painel direito era uma lista plana de sete seções com
-    o mesmo peso visual, misturando o que se ajusta toda hora (voz,
-    velocidade, volume) com o que se usa uma vez por sessão (sumário,
-    modo foco). Tudo junto não cabia em janelas baixas.
+    clicked = Signal()
 
-    O conteúdo vai em `.body`:
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("sectionHeaderBar")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(2, 9, 2, 9)
+        self._label = QLabel(text.upper())
+        self._label.setObjectName("sectionLabel")
+        self._chev = QLabel()
+        row.addWidget(self._label, 1)
+        row.addWidget(self._chev, 0)
 
-        sec = CollapsibleSection(painel, "Grifos", aberta=True)
-        sec.pack(fill="x")
-        tk.Label(sec.body, ...).pack()
-    """
+    def set_open(self, open_: bool):
+        self._chev.setPixmap(
+            icon("chev_up" if open_ else "chev_down", C["text_dim"]).pixmap(QSize(14, 14)))
 
-    def __init__(self, parent, title: str, *, aberta: bool = False, on_toggle=None):
-        super().__init__(parent, bg=C["panel"])
-        self._aberta = aberta
-        self._on_toggle = on_toggle
-        self.title = title
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
 
-        header = tk.Frame(self, bg=C["panel"], cursor="hand2")
-        header.pack(fill="x")
-        self._arrow = tk.Label(
-            header, text="", font=FONTS["symbol"],
-            bg=C["panel"], fg=C["text_dim"], width=2,
-        )
-        self._arrow.pack(side="left", padx=(14, 0))
-        self._label = tk.Label(
-            header, text=title.upper(), font=FONTS["label"],
-            bg=C["panel"], fg=C["text_dim"], anchor="w", pady=8,
-        )
-        self._label.pack(side="left", fill="x", expand=True)
 
-        for w in (header, self._arrow, self._label):
-            w.bind("<Button-1>", lambda _e: self.toggle())
-            w.bind("<Enter>", lambda _e: self._hover(True))
-            w.bind("<Leave>", lambda _e: self._hover(False))
+class CollapsibleSection(QWidget):
+    """Seção com título clicável que recolhe/expande o conteúdo."""
 
-        self.body = tk.Frame(self, bg=C["panel"])
+    toggled_open = Signal(str, bool)
+
+    def __init__(self, title: str, *, open_: bool = False, parent=None):
+        super().__init__(parent)
+        self._title = title
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        self._header = _SectionHeader(title)
+        self._header.clicked.connect(self.toggle)
+        lay.addWidget(self._header)
+
+        self.body = QWidget()
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(0, 2, 0, 8)
+        self.body_layout.setSpacing(6)
+        lay.addWidget(self.body)
+        self._open = open_
         self._sync()
 
-    def _hover(self, dentro: bool):
-        cor = C["text"] if dentro else C["text_dim"]
-        self._arrow.configure(fg=cor)
-        self._label.configure(fg=cor)
-
-    def _sync(self):
-        self._arrow.configure(text="▾" if self._aberta else "▸")
-        if self._aberta:
-            self.body.pack(fill="x", pady=(0, 8))
-        else:
-            self.body.pack_forget()
-
-    @property
-    def aberta(self) -> bool:
-        return self._aberta
+    def is_open(self) -> bool:
+        return self._open
 
     def toggle(self):
-        self._aberta = not self._aberta
+        self._open = not self._open
         self._sync()
-        if self._on_toggle:
-            self._on_toggle(self.title, self._aberta)
+        self.toggled_open.emit(self._title, self._open)
+
+    def _sync(self):
+        self.body.setVisible(self._open)
+        self._header.set_open(self._open)
+
+
+def ask_yes_no(parent, title: str, text: str, *, warning: bool = True) -> bool:
+    """Pergunta Sim/Não em português (o padrão do Qt sai em inglês)."""
+    from PySide6.QtWidgets import QMessageBox
+    box = QMessageBox(
+        QMessageBox.Icon.Warning if warning else QMessageBox.Icon.Question,
+        title, text, QMessageBox.StandardButton.NoButton, parent)
+    yes = box.addButton("Sim", QMessageBox.ButtonRole.YesRole)
+    no = box.addButton("Não", QMessageBox.ButtonRole.NoRole)
+    box.setDefaultButton(no)
+    box.exec()
+    return box.clickedButton() is yes

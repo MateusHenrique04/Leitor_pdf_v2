@@ -1,96 +1,104 @@
-import tkinter as tk
-from tkinter import messagebox
+"""ui/toc_window.py — sumário (TOC) do PDF."""
+from __future__ import annotations
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont
+from PySide6.QtWidgets import (
+    QDialog,
+    QFrame,
+    QHeaderView,
+    QLabel,
+    QMessageBox,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+)
 
 from config import C
 
 
+class TocDialog(QDialog):
+    page_chosen = Signal(int)   # página, base 1
+
+    def __init__(self, parent, toc: list[tuple[int, str, int]]):
+        super().__init__(parent)
+        self.setWindowTitle("Sumário")
+        self.resize(440, 580)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        accent = QFrame()
+        accent.setObjectName("accentBar")
+        accent.setFixedHeight(3)
+        root.addWidget(accent)
+        title = QLabel("Sumário")
+        title.setObjectName("dialogTitle")
+        title.setContentsMargins(20, 16, 20, 10)
+        root.addWidget(title)
+
+        tree = QTreeWidget()
+        tree.setHeaderHidden(True)
+        tree.setColumnCount(2)
+        tree.setIndentation(18)
+        tree.setRootIsDecorated(True)
+        tree.setEditTriggers(QTreeWidget.EditTrigger.NoEditTriggers)
+        tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        header = tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+
+        # O PDF entrega uma lista plana (nível, título, página); a árvore é
+        # montada pelos níveis, e um nível "pulado" cai no pai mais próximo.
+        stack: list[tuple[int, QTreeWidgetItem]] = []
+        bold = QFont()
+        bold.setBold(True)
+        for level, text, page in toc:
+            item = QTreeWidgetItem([text, str(page)])
+            item.setData(0, Qt.ItemDataRole.UserRole, page)
+            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            item.setForeground(1, QBrush(QColor(C["text_dim"])))
+            if level == 1:
+                item.setFont(0, bold)
+                item.setForeground(0, QBrush(QColor(C["red_text"])))
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            if stack:
+                stack[-1][1].addChild(item)
+            else:
+                tree.addTopLevelItem(item)
+            stack.append((level, item))
+        tree.expandAll()
+        tree.itemClicked.connect(self._on_click)
+        root.addWidget(tree, 1)
+
+    def _on_click(self, item: QTreeWidgetItem, _col: int):
+        page = item.data(0, Qt.ItemDataRole.UserRole)
+        if page:
+            self.page_chosen.emit(int(page))
+            self.accept()
+
+
 class TocMixin:
     def _show_toc(self):
-        """Abre janela com sumário extraído do PDF via PyMuPDF."""
+        """Abre o sumário embutido no PDF (via PyMuPDF)."""
         if not self.renderer:
-            messagebox.showinfo("Sumário", "Nenhum livro aberto.")
+            QMessageBox.information(self, "Sumário", "Nenhum livro aberto.")
             return
         toc = self.renderer.get_toc()
         if not toc:
-            messagebox.showinfo("Sumário",
-                                "Este PDF não possui sumário embutido. "
-                                "Tente um PDF com marcadores/bookmarks.")
+            QMessageBox.information(
+                self, "Sumário",
+                "Este PDF não possui sumário embutido. "
+                "Tente um PDF com marcadores/bookmarks.")
             return
+        dlg = TocDialog(self, toc)
+        dlg.page_chosen.connect(self._goto_page_from_toc)
+        dlg.exec()
 
-        win = tk.Toplevel(self)
-        win.title("Sumário")
-        win.configure(bg=C["bg"])
-        win.geometry("420x560")
-        win.resizable(True, True)
-
-        tk.Frame(win, bg=C["red"], height=3).pack(fill="x")
-        tk.Label(win, text="SUMÁRIO", font=("Georgia", 13, "bold"),
-                 bg=C["bg"], fg=C["text"], pady=12).pack()
-        tk.Frame(win, bg=C["border"], height=1).pack(fill="x", padx=16)
-
-        frame = tk.Frame(win, bg=C["bg"])
-        frame.pack(fill="both", expand=True, padx=0, pady=8)
-
-        scrollbar = tk.Scrollbar(frame, bg=C["border"],
-                                  troughcolor=C["panel"], bd=0, width=8)
-        scrollbar.pack(side="right", fill="y")
-
-        canvas = tk.Canvas(frame, bg=C["bg"], highlightthickness=0,
-                           yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=canvas.yview)
-
-        inner = tk.Frame(canvas, bg=C["bg"])
-        canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
-
-        def _on_configure(e):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.itemconfig(canvas_window, width=canvas.winfo_width())
-        inner.bind("<Configure>", _on_configure)
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(
-            canvas_window, width=e.width))
-
-        for level, title, page in toc:
-            indent = (level - 1) * 16
-            row = tk.Frame(inner, bg=C["bg"], cursor="hand2")
-            row.pack(fill="x", pady=1)
-
-            # Indicador de nível
-            color = C["red_text"] if level == 1 else C["text_dim"]
-            prefix = "▸ " if level == 1 else "  · "
-            lbl = tk.Label(row,
-                           text=prefix + title,
-                           font=("Georgia", 10 if level == 1 else 9,
-                                 "bold" if level == 1 else "normal"),
-                           bg=C["bg"], fg=color,
-                           anchor="w", padx=12 + indent, pady=5,
-                           wraplength=320, justify="left")
-            lbl.pack(side="left", fill="x", expand=True)
-
-            page_lbl = tk.Label(row, text=str(page),
-                                font=("Courier", 8), bg=C["bg"],
-                                fg=C["text_dim"], padx=10)
-            page_lbl.pack(side="right")
-
-            def _go(p=page):
-                self.current_page = p - 1
-                self.current_chunk_idx = 0
-                self._restart_loop()
-                win.destroy()
-
-            def _hover_on(e, r=row, lb=lbl, pl=page_lbl):
-                for w in (r, lb, pl):
-                    w.configure(bg=C["panel_alt"])
-
-            def _hover_off(e, r=row, lb=lbl, pl=page_lbl):
-                for w in (r, lb, pl):
-                    w.configure(bg=C["bg"])
-
-            for w in (row, lbl, page_lbl):
-                w.bind("<Button-1>", lambda e, fn=_go: fn())
-                w.bind("<Enter>", _hover_on)
-                w.bind("<Leave>", _hover_off)
-
-        win.bind("<MouseWheel>", lambda e: canvas.yview_scroll(
-            -1 if e.delta > 0 else 1, "units"))
-        win.bind("<Escape>", lambda _e: win.destroy())
+    def _goto_page_from_toc(self, page_1based: int):
+        self.current_page = max(0, min(page_1based - 1, self.total_pages - 1))
+        self.current_chunk_idx = 0
+        self._follow_suppressed = False
+        self._restart_loop()

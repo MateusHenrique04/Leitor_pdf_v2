@@ -2,7 +2,7 @@
 core/pdf_renderer.py
 --------------------
 Responsabilidade única: abrir um PDF e fornecer:
-  - render_page(n, target_px_width) → imagem PIL da página n (para exibir)
+  - render_page(n)  → imagem PIL da página n (para exibir)
   - text_for_page(n) → texto limpo da página n (para TTS)
   - word_rects(n)   → palavras da página com seus retângulos (grifo)
   - page_lengths    → quantidade de texto por página (duração estimada)
@@ -17,7 +17,6 @@ thread de background, nunca na thread principal.
 """
 
 import logging
-import math
 import re
 import threading
 import unicodedata
@@ -26,7 +25,7 @@ from collections import OrderedDict, defaultdict
 import pymupdf as fitz  # PyMuPDF (novo nome do pacote; `fitz` está deprecated)
 from PIL import Image
 
-from config import PDF_RENDER_CACHE_MB, PDF_RENDER_DPI, PDF_RENDER_MAX_PX
+from config import PDF_RENDER_DPI
 
 log = logging.getLogger(__name__)
 
@@ -42,11 +41,6 @@ def normalize_word(s: str) -> str:
 # 17", "CAPÍTULO 3 · 57"). Uma linha de texto corrido num livro comum tem
 # 70–95 caracteres. O limite separa os dois casos — ver _skip_key.
 _MAX_RUNNING_HEAD_CHARS = 60
-
-# Passo de arredondamento do DPI de renderização (ver dpi_for) e teto de
-# entradas no cache de páginas, além do orçamento de memória.
-_DPI_STEP = 25
-_MAX_CACHED_PAGES = 12
 
 
 def _skip_key(line: str) -> str | None:
@@ -99,12 +93,13 @@ class PDFRenderer:
             self._doc.close()
             raise PDFOpenError("O PDF não contém nenhuma página.")
 
-        # LRU de páginas renderizadas, indexado por (página, dpi): a mesma
-        # página convive em resoluções diferentes, então voltar o zoom
-        # reaproveita o que já foi renderizado em vez de refazer tudo.
-        self._cache: OrderedDict[tuple[int, int], Image.Image] = OrderedDict()
+        self._cache: OrderedDict[int, Image.Image] = OrderedDict()   # LRU de páginas renderizadas
         # LRU das palavras já extraídas por página (ver word_rects)
         self._words_cache: OrderedDict[int, list[tuple[str, dict]]] = OrderedDict()
+        # LRU dos renders "crus" (largura, altura, bytes RGB) usados pela UI Qt,
+        # chaveados por (página, escala). Ver render_raw.
+        self._raw_cache: OrderedDict[tuple[int, float], tuple[int, int, bytes]] = OrderedDict()
+        self._page_sizes: dict[int, tuple[float, float]] = {}
 
         # Detecta cabeçalhos/rodapés repetidos (≥30% das páginas) para remover do TTS
         # (__init__ roda antes de qualquer outra thread conhecer este
@@ -124,16 +119,10 @@ class PDFRenderer:
         hdr: dict[str, int] = {}
         ftr: dict[str, int] = {}
         self.page_lengths: list[int] = []
-        # Tamanho de cada página em pontos PDF. Guardado aqui porque quem
-        # desenha precisa dele a cada redesenho — várias vezes por segundo,
-        # enquanto o grifo acompanha a voz — e ler page.rect na hora poria
-        # o lock do documento nesse caminho quente.
-        self.page_sizes: list[tuple[float, float]] = []
         with self._lock:
             for page in self._doc:
                 lines = [ln.strip() for ln in page.get_text().split("\n") if ln.strip()]
                 self.page_lengths.append(sum(len(ln) for ln in lines))
-                self.page_sizes.append((page.rect.width, page.rect.height))
                 if lines:
                     k = _skip_key(lines[0])
                     if k is not None:
@@ -146,88 +135,26 @@ class PDFRenderer:
         thr = max(3, int(self.total * 0.30))
         self._skip = {k for k, v in {**hdr, **ftr}.items() if v >= thr}
 
-    def page_size(self, n: int) -> tuple[float, float]:
-        """Tamanho da página n em pontos PDF (72 pt = 1 polegada).
-
-        É o que permite converter entre coordenadas do PDF e pixels da
-        imagem renderizada sem supor uma resolução fixa — ver
-        ui/viewer._img_px_per_pt."""
-        if not (0 <= n < len(self.page_sizes)):
-            return (0.0, 0.0)
-        return self.page_sizes[n]
-
-    def dpi_for(self, n: int, target_px_width: int | None) -> int:
-        """
-        Resolução em que a página n deve ser renderizada para aparecer com
-        `target_px_width` pixels de largura na tela.
-
-        Renderizar abaixo do tamanho de exibição e deixar a ampliação para
-        o redimensionamento na tela é o que borrava livros de formato
-        pequeno: ampliar não inventa detalhe. Aqui o DPI acompanha o
-        tamanho pedido, limitado por PDF_RENDER_DPI (piso — nunca pior que
-        antes) e por PDF_RENDER_MAX_PX (teto de memória).
-
-        O valor é arredondado para cima em passos de _DPI_STEP para que
-        arrastar a borda da janela não gere uma resolução nova — e um
-        descarte do cache — a cada pixel de diferença.
-        """
-        w_pt, h_pt = self.page_size(n)
-        if not w_pt or not h_pt or not target_px_width:
-            return PDF_RENDER_DPI
-
-        needed = target_px_width * 72.0 / w_pt
-        dpi = math.ceil(needed / _DPI_STEP) * _DPI_STEP
-
-        # O teto é em pixels (ver config): o DPI que cada livro alcança
-        # depende do seu formato, e é o tamanho da imagem — não o número
-        # de DPI — que ocupa memória.
-        px_cap_dpi = PDF_RENDER_MAX_PX * 72.0 / max(w_pt, h_pt)
-        return int(max(PDF_RENDER_DPI, min(dpi, px_cap_dpi)))
-
-    def render_page(self, n: int, target_px_width: int | None = None) -> Image.Image:
-        """
-        Renderiza a página n (0-indexed) e retorna uma imagem PIL.
-
-        `target_px_width` é a largura, em pixels de tela, com que a página
-        vai ser exibida; a resolução é escolhida a partir dela (ver
-        dpi_for). Sem o parâmetro, renderiza no DPI base — é o que fazem
-        os testes e qualquer chamador que só queira a página.
-        """
-        dpi = self.dpi_for(n, target_px_width)
-        key = (n, dpi)
+    def render_page(self, n: int) -> Image.Image:
+        """Renderiza a página n (0-indexed) e retorna uma imagem PIL."""
         with self._lock:
             if self._closed:
                 raise ValueError("PDFRenderer já foi fechado")
-            if key in self._cache:
-                self._cache.move_to_end(key)  # LRU: marca como usada recentemente
-                return self._cache[key]
-            mat  = fitz.Matrix(dpi / 72, dpi / 72)
+            if n in self._cache:
+                self._cache.move_to_end(n)   # LRU: marca como usada recentemente
+                return self._cache[n]
+            mat  = fitz.Matrix(PDF_RENDER_DPI / 72, PDF_RENDER_DPI / 72)
             pix  = self._doc[n].get_pixmap(matrix=mat, alpha=False)
             width, height, samples = pix.width, pix.height, pix.samples
         # pix.samples já é uma cópia independente do documento — a conversão
         # para PIL.Image não precisa do lock.
         img = Image.frombytes("RGB", (width, height), samples)
         with self._lock:
-            self._cache[key] = img
-            self._trim_cache_locked()
+            # Limita cache a 10 páginas para não consumir muita RAM (política LRU real)
+            if len(self._cache) >= 10:
+                self._cache.popitem(last=False)
+            self._cache[n] = img
         return img
-
-    def _trim_cache_locked(self) -> None:
-        """Descarta as páginas usadas há mais tempo até o cache caber no
-        orçamento. O limite é em MEMÓRIA, não em número de páginas: com
-        resolução variável uma página renderizada para o zoom máximo pesa
-        dezenas de vezes mais que a mesma página no DPI base, e contar
-        páginas deixaria de dizer qualquer coisa sobre a RAM usada.
-
-        Mantém sempre ao menos uma entrada — a recém-inserida, que é a
-        página que está prestes a ser desenhada."""
-        budget = PDF_RENDER_CACHE_MB * 1024 * 1024
-        total = sum(im.width * im.height * 3 for im in self._cache.values())
-        while len(self._cache) > 1 and (
-            total > budget or len(self._cache) > _MAX_CACHED_PAGES
-        ):
-            _key, old = self._cache.popitem(last=False)
-            total -= old.width * old.height * 3
 
     def text_for_page(self, n: int) -> str:
         """
@@ -536,30 +463,70 @@ class PDFRenderer:
                 return re.sub(r"[^\w\-']", "", word).strip() or None
         return None
 
-    def prefetch(self, n: int, target_px_width: int | None = None) -> None:
+    def page_size(self, n: int) -> tuple[float, float]:
+        """Largura e altura da página n em pontos PDF (1 pt = 1/72 pol).
+        É o sistema de coordenadas de word_rects/search_text/grifos, e por
+        isso a UI usa pontos como unidade da cena — zoom e resolução viram
+        só uma escala, sem converter nada."""
+        cached = self._page_sizes.get(n)      # leitura sem lock: um render longo
+        if cached is not None:                # em andamento não pode travar a UI
+            return cached
+        with self._lock:
+            if self._closed:
+                return (612.0, 792.0)
+            if n not in self._page_sizes:
+                r = self._doc[n].rect
+                self._page_sizes[n] = (float(r.width), float(r.height))
+            return self._page_sizes[n]
+
+    def render_raw(self, n: int, scale: float) -> tuple[int, int, bytes]:
+        """
+        Renderiza a página n a `scale` pixels por ponto e devolve
+        (largura, altura, bytes RGB) — sem PIL no meio.
+
+        A UI pede a escala exata de que precisa (zoom × DPI da tela), então
+        o texto sai nítido em qualquer zoom, em vez de uma imagem fixa em
+        100 DPI esticada. Resultados pequenos ficam num cache LRU curto.
+        """
+        key = (n, round(scale, 2))
+        with self._lock:
+            if self._closed:
+                raise ValueError("PDFRenderer já foi fechado")
+            if key in self._raw_cache:
+                self._raw_cache.move_to_end(key)
+                return self._raw_cache[key]
+            mat = fitz.Matrix(scale, scale)
+            page = self._doc[n]
+            self._page_sizes.setdefault(n, (float(page.rect.width), float(page.rect.height)))
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            result = (pix.width, pix.height, bytes(pix.samples))
+            # Só cacheia imagens de até ~8 MP: as gigantes (zoom máximo)
+            # custariam dezenas de MB por entrada.
+            if pix.width * pix.height <= 8_000_000:
+                if len(self._raw_cache) >= 4:
+                    self._raw_cache.popitem(last=False)
+                self._raw_cache[key] = result
+        return result
+
+    def prefetch(self, n: int) -> None:
         """
         Pré-renderiza as páginas adjacentes a n em threads daemon.
         Chamado após renderizar a página atual para eliminar atraso na troca.
-
-        Recebe o mesmo `target_px_width` da página atual: sem ele o
-        prefetch encheria o cache com páginas no DPI base, que o próximo
-        desenho descartaria por estarem na resolução errada.
         """
         with self._lock:
             pending = [adj for adj in (n - 1, n + 1)
-                       if 0 <= adj < self.total
-                       and (adj, self.dpi_for(adj, target_px_width)) not in self._cache]
+                       if 0 <= adj < self.total and adj not in self._cache]
         for adj in pending:
             threading.Thread(
-                target=self._prefetch_one, args=(adj, target_px_width), daemon=True
+                target=self._prefetch_one, args=(adj,), daemon=True
             ).start()
 
-    def _prefetch_one(self, n: int, target_px_width: int | None = None) -> None:
+    def _prefetch_one(self, n: int) -> None:
         # Documento pode já ter sido fechado (troca de livro) entre o
         # agendamento do prefetch e esta thread rodar — falha silenciosa,
         # sem log de erro barulhento, pois é esperado nesse caso.
         try:
-            self.render_page(n, target_px_width)
+            self.render_page(n)
         except Exception as e:
             log.debug("Prefetch da página %d falhou (ignorado): %s", n, e)
 
@@ -587,3 +554,4 @@ class PDFRenderer:
             self._doc.close()
             self._cache.clear()
             self._words_cache.clear()
+            self._raw_cache.clear()

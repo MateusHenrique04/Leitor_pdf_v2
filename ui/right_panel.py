@@ -1,300 +1,219 @@
-import tkinter as tk
+"""ui/right_panel.py — painel de ajustes: voz, velocidade, volume, grifos, livro e foco."""
+from __future__ import annotations
 
-import customtkinter as ctk
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
 
-import data.prefs as prefs
-from config import FONTS, HIGHLIGHT_COLORS, SPEEDS, VOICES, C
-from ui.widgets import CollapsibleSection
+from config import HIGHLIGHT_COLORS, SPEEDS, VOICES, C
+from ui.icons import icon
+from ui.theme import mono_font
+from ui.widgets import CollapsibleSection, MenuButton
+
+PANEL_WIDTH = 256
 
 
-class RightPanelMixin:
-    def _build_right(self):
-        # O conteúdo deste painel mede ~640px de altura. Numa janela de
-        # 600–620px (o mínimo permitido é 900x600) o pack simplesmente
-        # deixava de mapear o que não cabia: "Iniciar Foco", o contador do
-        # foco e o botão "Ver Sumário" sumiam — sem corte visível, sem
-        # barra de rolagem, sem nenhuma pista de que existiam. Ficavam
-        # inalcançáveis até a janela ser aumentada.
-        #
-        # Com um frame rolável, o conteúdo que não cabe continua a um
-        # scroll de distância em qualquer tamanho de janela.
-        outer = tk.Frame(self, bg=C["panel"], width=216)
-        outer.grid(row=0, column=2, sticky="nsew")
-        outer.grid_propagate(False)
-        outer.grid_rowconfigure(0, weight=1)
-        outer.grid_columnconfigure(0, weight=1)
-        self._right_frame = outer   # escondido/mostrado pelo modo leitura
+def _repolish(w: QWidget):
+    w.style().unpolish(w)
+    w.style().polish(w)
 
-        panel = ctk.CTkScrollableFrame(
-            outer,
-            fg_color=C["panel"],
-            scrollbar_button_color=C["border"],
-            scrollbar_button_hover_color=C["text_dim"],
-        )
-        panel.grid(row=0, column=0, sticky="nsew")
-        # A largura útil interna fica igual à de antes (200 − 32 de padx):
-        # 216 menos a barra de rolagem, menos os mesmos 32 de padx.
 
-        def _sep():
-            tk.Frame(panel, bg=C["border"], height=1).pack(fill="x", padx=16, pady=(10, 0))
+def _label(text: str) -> QLabel:
+    lb = QLabel(text)
+    lb.setObjectName("sectionLabel")
+    return lb
 
-        def _lbl(text):
-            tk.Label(panel, text=text, font=FONTS["label"],
-                     bg=C["panel"], fg=C["text_dim"]).pack(anchor="w", padx=16, pady=(10, 4))
 
-        # VOZ — dropdown (seleção inicial vem da preferência persistida)
-        _lbl("VOZ")
-        voice_names = list(VOICES.keys())
-        self._voice_idx = voice_names.index(self._pref_voice_name)
-        self._voice_popup_open = False
+def _action_button(text: str, ic: str | None = None, checkable: bool = False) -> QPushButton:
+    b = QPushButton(("  " + text) if ic else text)
+    b.setObjectName("ghost")
+    b.setCheckable(checkable)
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    if ic:
+        b.setIcon(icon(ic, C["text_soft"]))
+    return b
 
-        vbtn = tk.Frame(panel, bg=C["panel_alt"], cursor="hand2")
-        vbtn.pack(fill="x", padx=16)
-        self._voice_lbl = tk.Label(
-            vbtn, text=voice_names[self._voice_idx],
-            font=FONTS["mono"], bg=C["panel_alt"], fg=C["text_soft"],
-            anchor="w", padx=10, pady=8, wraplength=155,
-        )
-        self._voice_lbl.pack(side="left", fill="x", expand=True)
-        arr = tk.Label(vbtn, text="▾", font=FONTS["symbol"],
-                       bg=C["panel_alt"], fg=C["red_text"], padx=6)
-        arr.pack(side="right")
 
-        self._voice_popup = tk.Frame(panel, bg=C["panel_alt2"],
-                                      highlightbackground=C["border_soft"],
-                                      highlightthickness=1)
+class RightPanel(QWidget):
+    voice_changed = Signal(str)
+    speed_changed = Signal(str)
+    volume_changed = Signal(float)         # 0.0–1.0
+    color_changed = Signal(str)            # rótulo de HIGHLIGHT_COLORS
+    select_toggled = Signal(bool)
+    clear_clicked = Signal()
+    export_clicked = Signal()
+    finished_clicked = Signal()
+    toc_clicked = Signal()
+    focus_clicked = Signal()
+    section_toggled = Signal(str, bool)
 
-        def _pick_voice(idx):
-            self._voice_idx = idx
-            name = voice_names[idx]
-            self._voice_lbl.configure(text=name)
-            self._voice = VOICES[name]
-            prefs.set_value("voice", name)
-            # O ritmo aprendido era o da voz anterior; recomeça do padrão.
-            if self._timeline is not None:
-                self._timeline.reset_calibration()
-            self._voice_popup.pack_forget()
-            self._voice_popup_open = False
+    def __init__(self, voice: str, speed: str, volume: float, color_label: str,
+                 sections: dict, parent=None):
+        super().__init__(parent)
+        self.setObjectName("rightPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedWidth(PANEL_WIDTH)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
 
-        def _toggle_voice(e=None):
-            if self._voice_popup_open:
-                self._voice_popup.pack_forget()
-                self._voice_popup_open = False
-            else:
-                for w in self._voice_popup.winfo_children():
-                    w.destroy()
-                for i, name in enumerate(voice_names):
-                    sel = i == self._voice_idx
-                    opt = tk.Label(
-                        self._voice_popup,
-                        text=("▸ " if sel else "   ") + name,
-                        font=FONTS["mono"],
-                        bg=C["select_bg"] if sel else C["panel_alt2"],
-                        fg=C["red_text"] if sel else C["text_soft"],
-                        anchor="w", padx=10, pady=7,
-                        cursor="hand2", wraplength=165,
-                    )
-                    opt.pack(fill="x")
-                    opt.bind("<Button-1>", lambda e, i=i: _pick_voice(i))
-                    opt.bind("<Enter>",    lambda e, o=opt: o.configure(bg=C["hover"]))
-                    opt.bind("<Leave>",    lambda e, o=opt, i=i:
-                             o.configure(bg=C["select_bg"] if i == self._voice_idx else C["panel_alt2"]))
-                # `after=vbtn` é essencial aqui: pack() empilha widgets na
-                # ORDEM EM QUE FORAM EMPACOTADOS, não na ordem em que foram
-                # criados. Como este popup só é empacotado no clique (bem
-                # depois de todo o resto do painel já estar montado), sem
-                # `after=` ele cairia no fim da pilha — aparecendo lá
-                # embaixo do painel em vez de logo abaixo do dropdown.
-                self._voice_popup.pack(fill="x", padx=16, after=vbtn)
-                self._voice_popup_open = True
+        # Rolável: com a janela baixa o conteúdo que não cabe continua a um
+        # scroll de distância, em vez de simplesmente sumir.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        root.addWidget(scroll)
+        body = QWidget()
+        body.setObjectName("panelBody")
+        body.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        scroll.setWidget(body)
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(8)
 
-        for w in (vbtn, self._voice_lbl, arr):
-            w.bind("<Button-1>", _toggle_voice)
+        # ── Voz ──────────────────────────────────────────
+        lay.addWidget(_label("VOZ"))
+        self._voice_names = list(VOICES.keys())
+        self._voice_btn = MenuButton(self._voice_names)
+        self._voice_btn.set_index(self._voice_names.index(voice))
+        self._voice_btn.changed.connect(lambda i: self.voice_changed.emit(self._voice_names[i]))
+        lay.addWidget(self._voice_btn)
 
-        # VELOCIDADE — botões preset
-        _sep()
-        _lbl("VELOCIDADE")
-        self._speed_btns: dict[str, tk.Label] = {}
-        speed_grid = tk.Frame(panel, bg=C["panel"])
-        speed_grid.pack(fill="x", padx=16, pady=2)
-
-        def _pick_speed(label):
-            for _label, b in self._speed_btns.items():
-                b.configure(bg=C["panel_alt"], fg=C["text_dim"])
-            self._speed_btns[label].configure(bg=C["red"], fg=C["on_accent"])
-            self._speed = SPEEDS[label]
-            prefs.set_value("speed", label)
-            # A duração estimada do livro depende da velocidade escolhida.
-            if self._timeline is not None:
-                self._timeline.speed_pct = self._speed
-                self._refresh_timeline()
-
+        # ── Velocidade ───────────────────────────────────
+        lay.addSpacing(6)
+        lay.addWidget(_label("VELOCIDADE"))
+        grid = QGridLayout()
+        grid.setSpacing(5)
+        self._speed_group = QButtonGroup(self)
+        self._speed_group.setExclusive(True)
         for i, label in enumerate(SPEEDS):
-            b = tk.Label(speed_grid, text=label,
-                         font=FONTS["mono_bold"],
-                         bg=C["panel_alt"], fg=C["text_dim"],
-                         cursor="hand2", pady=6, anchor="center", width=5)
-            b.grid(row=i // 3, column=i % 3, padx=2, pady=2, sticky="ew")
-            speed_grid.grid_columnconfigure(i % 3, weight=1)
-            self._speed_btns[label] = b
-            b.bind("<Button-1>", lambda e, lb=label: _pick_speed(lb))
-        _pick_speed(self._pref_speed_label)
+            b = QPushButton(label)
+            b.setObjectName("chip")
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setChecked(label == speed)
+            b.clicked.connect(lambda _=False, lb=label: self.speed_changed.emit(lb))
+            self._speed_group.addButton(b)
+            grid.addWidget(b, i // 3, i % 3)
+        lay.addLayout(grid)
 
-        # VOLUME — slider (valor inicial vem da preferência persistida)
-        _sep()
-        _lbl("VOLUME")
-        vol_row = tk.Frame(panel, bg=C["panel"])
-        vol_row.pack(fill="x", padx=16, pady=2)
-        vol_row.grid_columnconfigure(0, weight=1)
+        # ── Volume ───────────────────────────────────────
+        lay.addSpacing(6)
+        lay.addWidget(_label("VOLUME"))
+        vrow = QHBoxLayout()
+        self._vol = QSlider(Qt.Orientation.Horizontal)
+        self._vol.setRange(0, 100)
+        self._vol.setValue(int(round(volume * 100)))
+        self._vol.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._vol_lbl = QLabel(f"{self._vol.value()}%")
+        self._vol_lbl.setObjectName("pageLabel")
+        self._vol_lbl.setFont(mono_font(10, True))
+        self._vol_lbl.setFixedWidth(44)
+        self._vol_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._vol.valueChanged.connect(self._on_volume)
+        vrow.addWidget(self._vol, 1)
+        vrow.addWidget(self._vol_lbl)
+        lay.addLayout(vrow)
 
-        self._vol_lbl = tk.Label(
-            vol_row, text=f"{int(self._pref_volume*100)}%",
-            font=("Courier", 12, "bold"),
-            bg=C["panel"], fg=C["red_text"], width=5,
-        )
-        self._vol_lbl.grid(row=0, column=1, padx=(6, 0))
+        sep = QFrame()
+        sep.setObjectName("separator")
+        sep.setFixedHeight(1)
+        lay.addSpacing(6)
+        lay.addWidget(sep)
 
-        def _on_volume(v):
-            self._vol_lbl.configure(text=f"{int(float(v))}%")
-            self.player.volume = float(v) / 100
-            prefs.set_value("volume", self.player.volume)
-
-        vol_sl = tk.Scale(
-            vol_row, from_=0, to=100, orient="horizontal",
-            bg=C["panel"], troughcolor=C["border"],
-            activebackground=C["red_hot"],
-            highlightthickness=0, bd=0, showvalue=0,
-            sliderrelief="flat", sliderlength=12, width=6, fg=C["red"],
-            command=_on_volume,
-        )
-        vol_sl.set(int(self._pref_volume * 100))
-        vol_sl.grid(row=0, column=0, sticky="ew")
-
-        # ── Seções recolhíveis ───────────────────────────────────
-        # Voz, velocidade e volume ficam sempre à mão porque se ajustam
-        # durante a leitura. O resto — grifos, ações do livro, modo foco
-        # — se usa uma vez por sessão e por isso começa recolhido: o
-        # painel inteiro passa a caber na tela sem rolagem.
-        _sep()
-        secoes_abertas = self._pref_panel_sections
-
-        def _secao(titulo: str, padrao: bool) -> CollapsibleSection:
-            sec = CollapsibleSection(
-                panel, titulo,
-                aberta=secoes_abertas.get(titulo, padrao),
-                on_toggle=self._on_section_toggle,
-            )
-            sec.pack(fill="x")
+        # ── Seções recolhíveis ───────────────────────────
+        # Voz/velocidade/volume ficam sempre à mão porque se ajustam durante
+        # a leitura; o resto se usa uma vez por sessão e começa recolhido.
+        def section(title: str, default_open: bool) -> CollapsibleSection:
+            sec = CollapsibleSection(title, open_=sections.get(title, default_open))
+            sec.toggled_open.connect(self.section_toggled)
+            lay.addWidget(sec)
             return sec
 
-        # GRIFOS — cores centralizadas em config.HIGHLIGHT_COLORS
-        grifos = _secao("Grifos", True).body
+        grifos = section("Grifos", True)
+        self._color_labels = list(HIGHLIGHT_COLORS.keys())
+        names = [lb.split(" ", 1)[-1] for lb in self._color_labels]   # sem o emoji
+        self._color_btn = MenuButton(names)
+        for i, lb in enumerate(self._color_labels):
+            self._color_btn.set_item_icon(i, icon("dot", HIGHLIGHT_COLORS[lb]))
+        self._color_btn.set_index(self._color_labels.index(color_label))
+        self._color_btn.changed.connect(lambda i: self.color_changed.emit(self._color_labels[i]))
+        grifos.body_layout.addWidget(self._color_btn)
 
-        color_labels = list(HIGHLIGHT_COLORS.keys())
-        self._color_map = HIGHLIGHT_COLORS
+        self._btn_select = _action_button("Selecionar trecho", "pencil", checkable=True)
+        self._btn_select.toggled.connect(self._on_select_toggled)
+        grifos.body_layout.addWidget(self._btn_select)
+        btn_clear = _action_button("Limpar página", "trash")
+        btn_clear.clicked.connect(self.clear_clicked)
+        grifos.body_layout.addWidget(btn_clear)
+        btn_export = _action_button("Exportar grifos", "export")
+        btn_export.clicked.connect(self.export_clicked)
+        grifos.body_layout.addWidget(btn_export)
 
-        self._color_var = ctk.StringVar(value=self._pref_highlight_label)
-        self._highlight_color = ctk.StringVar(value=HIGHLIGHT_COLORS[self._pref_highlight_label])
+        livro = section("Este livro", False)
+        self._btn_finished = _action_button("Marcar como lido", "check")
+        self._btn_finished.clicked.connect(self.finished_clicked)
+        livro.body_layout.addWidget(self._btn_finished)
+        btn_toc = _action_button("Ver sumário", "list")
+        btn_toc.clicked.connect(self.toc_clicked)
+        livro.body_layout.addWidget(btn_toc)
 
-        def _on_pick_color(label):
-            self._highlight_color.set(self._color_map.get(label, HIGHLIGHT_COLORS[self._pref_highlight_label]))
-            prefs.set_value("highlight_color_label", label)
+        foco = section("Modo foco", False)
+        self._btn_focus = _action_button("Iniciar foco", "target")
+        self._btn_focus.clicked.connect(self.focus_clicked)
+        foco.body_layout.addWidget(self._btn_focus)
+        self._focus_lbl = QLabel("")
+        self._focus_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._focus_lbl.setFont(mono_font(11, True))
+        foco.body_layout.addWidget(self._focus_lbl)
 
-        color_menu = ctk.CTkOptionMenu(
-            grifos,
-            variable  = self._color_var,
-            values    = color_labels,
-            command   = _on_pick_color,
-            fg_color  = C["panel"],
-            button_color      = C["border"],
-            button_hover_color= C["red"],
-            text_color= C["text"],
-        )
-        color_menu.pack(pady=(0, 0), padx=16, fill="x")
+        lay.addStretch(1)
 
-        self._btn_select = ctk.CTkButton(
-            grifos,
-            text        = "✏ Selecionar",
-            command     = self._toggle_hl_mode,
-            fg_color    = C["border"],
-            hover_color = C["border_soft"],
-            text_color  = C["text"],
-        )
-        self._btn_select.pack(pady=(8, 0), padx=16, fill="x")
+    # — internos ——————————————————————————————————————————
+    def _on_volume(self, v: int):
+        self._vol_lbl.setText(f"{v}%")
+        self.volume_changed.emit(v / 100.0)
 
-        btn_clear = ctk.CTkButton(
-            grifos,
-            text     = "🗑 Limpar página",
-            command  = self._clear_page_highlights,
-            fg_color = C["panel"],
-            hover_color = C["border"],
-            text_color  = C["text_dim"],
-        )
-        btn_clear.pack(pady=(4, 0), padx=16, fill="x")
+    def _on_select_toggled(self, on: bool):
+        self._btn_select.setText("  Cancelar seleção" if on else "  Selecionar trecho")
+        self._btn_select.setIcon(icon("close" if on else "pencil",
+                                      C["on_accent"] if on else C["text_soft"]))
+        self.select_toggled.emit(on)
 
-        btn_export = ctk.CTkButton(
-            grifos,
-            text        = "📤 Exportar Grifos",
-            command     = self._export_highlights,
-            fg_color    = C["panel"],
-            hover_color = C["border"],
-            text_color  = C["text_dim"],
-            border_width=1,
-            border_color=C["border"],
-        )
-        btn_export.pack(pady=(4, 0), padx=16, fill="x")
+    # — API ——————————————————————————————————————————————
+    def set_voice(self, name: str):
+        self._voice_btn.set_index(self._voice_names.index(name))
 
-        # ESTE LIVRO — ações que valem só para o livro aberto
-        livro = _secao("Este livro", False).body
+    def set_select_mode(self, on: bool):
+        self._btn_select.blockSignals(True)
+        self._btn_select.setChecked(on)
+        self._btn_select.blockSignals(False)
+        self._btn_select.setText("  Cancelar seleção" if on else "  Selecionar trecho")
+        self._btn_select.setIcon(icon("close" if on else "pencil",
+                                      C["on_accent"] if on else C["text_soft"]))
 
-        self._btn_mark_finished = ctk.CTkButton(
-            livro,
-            text="✅ Marcar Lido",
-            command=self._toggle_finished,
-            fg_color=C["panel"],
-            hover_color=C["border"],
-            text_color=C["text_dim"],
-            border_width=1,
-            border_color=C["border"]
-        )
-        self._btn_mark_finished.pack(pady=(0, 0), padx=16, fill="x")
+    def set_finished(self, finished: bool):
+        self._btn_finished.setText(
+            "  Marcar como não lido" if finished else "  Marcar como lido")
+        self._btn_finished.setIcon(icon("book" if finished else "check", C["text_soft"]))
 
-        btn_toc = ctk.CTkButton(
-            livro,
-            text="📋 Ver Sumário",
-            command=self._show_toc,
-            fg_color=C["panel"],
-            hover_color=C["border"],
-            text_color=C["text_dim"],
-            border_width=1,
-            border_color=C["border"]
-        )
-        btn_toc.pack(pady=(4, 0), padx=16, fill="x")
+    def set_focus_active(self, active: bool):
+        self._btn_focus.setText("  Foco ativo — cancelar" if active else "  Iniciar foco")
+        self._btn_focus.setObjectName("danger" if active else "ghost")
+        self._btn_focus.setIcon(icon("target", C["red_text"] if active else C["text_soft"]))
+        _repolish(self._btn_focus)
 
-        # MODO FOCO
-        foco = _secao("Modo foco", False).body
-        self._focus_btn = ctk.CTkButton(
-            foco,
-            text="🎯 Iniciar Foco",
-            command=self._open_focus_dialog,
-            fg_color=C["panel"],
-            hover_color=C["border"],
-            text_color=C["text_dim"],
-            border_width=1,
-            border_color=C["border"],
-        )
-        self._focus_btn.pack(pady=(0, 0), padx=16, fill="x")
-
-        self._focus_lbl = tk.Label(
-            foco, text="",
-            font=FONTS["mono_bold"],
-            bg=C["panel"], fg=C["success"],
-        )
-        self._focus_lbl.pack(anchor="center", pady=(4, 0))
-
-    def _on_section_toggle(self, titulo: str, aberta: bool):
-        """Lembra quais seções o usuário deixou abertas."""
-        estado = dict(self._pref_panel_sections)
-        estado[titulo] = aberta
-        self._pref_panel_sections = estado
-        prefs.set_value("panel_sections", estado)
+    def set_focus_text(self, text: str, color: str | None = None):
+        self._focus_lbl.setStyleSheet(f"color: {color or C['success']};")
+        self._focus_lbl.setText(text)

@@ -164,27 +164,7 @@ DEFAULT_SPEED = "1×"
 assert DEFAULT_SPEED in SPEEDS, "DEFAULT_SPEED precisa existir em SPEEDS"
 
 DEFAULT_VOLUME = 0.7
-# Resolução de renderização das páginas.
-#
-# PDF_RENDER_DPI é o PISO, não um valor fixo: a página é renderizada na
-# resolução que a tela realmente vai usar (ver ui/viewer._target_px_width).
-# Com um DPI fixo, um livro de formato pequeno — "Meditações Metafísicas",
-# 252x331 pt, metade de um A4 — rendia 350x460 px e era AMPLIADO para
-# preencher a janela: ampliar não cria detalhe, e o texto saía borrado.
-# Um A4 no mesmo DPI rende 827x1169 px, é REDUZIDO para caber, e por isso
-# sempre pareceu nítido. A resolução agora acompanha o tamanho de exibição.
-PDF_RENDER_DPI = 100
-# Teto de resolução: protege a memória com zoom alto (o zoom vai até 5x).
-# Acima disto a página volta a ser ampliada — já em resolução alta o
-# bastante para a diferença não aparecer.
-#
-# O teto é em PIXELS, não em DPI: é pixel que ocupa RAM, e o mesmo DPI
-# rende imagens de tamanhos bem diferentes conforme o formato do livro.
-# Um teto em DPI penalizaria justamente os livros pequenos, que precisam
-# de MAIS DPI para chegar à mesma quantidade de pixels — o problema que
-# esta mudança veio corrigir.
-PDF_RENDER_MAX_PX  = 4000   # maior lado da imagem renderizada, em pixels
-PDF_RENDER_CACHE_MB = 192   # orçamento do cache de páginas renderizadas
+PDF_RENDER_DPI = 100   # resolução da renderização das páginas
 
 # Cores disponíveis para grifos manuais — única fonte, usada por
 # ui/right_panel.py e ui/highlights_mixin.py.
@@ -203,3 +183,17 @@ WORD_HIGHLIGHT_OPACITY  = 0.45
 DEFAULT_HIGHLIGHT_COLOR = "#FFDD00"
 DEFAULT_HIGHLIGHT_LABEL = "🟡 Amarelo"
 assert DEFAULT_HIGHLIGHT_LABEL in HIGHLIGHT_COLORS
+
+# ──────────────────────────────────────────────────────────────────
+# Interface Qt (PySide6)
+# ──────────────────────────────────────────────────────────────────
+# Fonte de interface do sistema. O Qt cai na próxima da lista se a
+# primeira não existir (Segoe UI no Windows, o resto no Linux/Mac).
+UI_FONT_FAMILIES = ["Segoe UI Variable Text", "Segoe UI", "Inter", "Helvetica Neue", "Arial"]
+MONO_FONT_FAMILIES = ["Cascadia Mono", "Consolas", "Menlo", "Courier New"]
+
+# Margem (em pontos PDF) ao redor da página na área de leitura.
+PAGE_MARGIN_PT = 14
+# Teto de pixels de uma página renderizada (zoom máximo): acima disso o
+# texto fica levemente suave em vez de gastar centenas de MB de RAM.
+MAX_RENDER_PIXELS = 24_000_000

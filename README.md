@@ -1,6 +1,6 @@
 # Lector — leitor de PDF com narração e dicionário interativo
 
-Aplicativo desktop (Windows/Linux/Mac, Python + Tkinter/CustomTkinter) para
+Aplicativo desktop (Windows/Linux/Mac, Python + PySide6 (Qt)) para
 ler PDFs em voz alta com destaque sincronizado palavra a palavra, dicionário
 interativo (clique numa palavra para ver a definição em PT/EN/ES), grifos
 persistentes, biblioteca de livros com progresso salvo, sumário e busca de
@@ -109,7 +109,7 @@ core/                 # lógica de negócio, sem dependência de UI
   player.py           # reprodução de áudio (pygame)
   generation.py       # cancelamento de trabalho obsoleto entre threads
 data/                 # persistência em JSON (biblioteca, histórico, grifos, preferências)
-ui/                   # interface (CustomTkinter/Tkinter), via mixins compostos em App
+ui/                   # interface (PySide6/Qt), via mixins compostos em App
 tests/                # testes automatizados (pytest)
 ```
 
