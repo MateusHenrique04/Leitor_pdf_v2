@@ -8,6 +8,7 @@ import com.lector.app.data.AddBookResult
 import com.lector.app.data.BookEntity
 import com.lector.app.data.BookRepository
 import com.lector.app.data.LectorDatabase
+import com.lector.app.data.audio.AudioDatabase
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -15,6 +16,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -23,6 +25,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     val books: StateFlow<List<BookEntity>> =
         repo.observeAll().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Livros com algum trecho de áudio baixado (selo "Disponível offline"). */
+    val offlineBooks: StateFlow<Set<String>> =
+        AudioDatabase.get(app).audioDao().observeBookIdsWithAudio()
+            .map { it.toSet() }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
 
     private val _isAdding = MutableStateFlow(false)
     val isAdding: StateFlow<Boolean> = _isAdding.asStateFlow()

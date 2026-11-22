@@ -48,6 +48,16 @@ class BookIndexTest {
         assertNull(index.previous(c[0]))
     }
 
+    @Test fun intervaloDeTrechosPorPaginas() {
+        assertEquals(0..1, index.chunkRange(0, 0))
+        assertEquals(2..2, index.chunkRange(1, 2)) // pág. 1 não tem trechos que comecem nela
+        assertEquals(0..4, index.chunkRange(0, 3))
+        assertEquals(2..4, index.chunkRange(2, 3))
+        assertNull(index.chunkRange(1, 1))
+        assertNull(index.chunkRange(3, 1)) // intervalo invertido
+        assertNull(index.chunkRange(10, 20))
+    }
+
     @Test fun vazio() {
         assertTrue(BookIndex(1, 3, emptyList()).isEmpty)
         assertTrue(!index.isEmpty)

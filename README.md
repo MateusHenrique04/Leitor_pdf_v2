@@ -31,7 +31,27 @@ Fase 6c: NarrationService (player/): MediaSessionService que expõe o ExoPlayer 
 narração com a tela apagada e ao voltar para a biblioteca). O motor liga ao serviço (bindService) ao começar e solta ao parar; o serviço se encerra quando o estado volta a IDLE.
 Permissão de notificações (Android 13+) pedida na 1ª vez em "Ouvir". Manifesto: FOREGROUND_SERVICE(+_MEDIA_PLAYBACK), POST_NOTIFICATIONS, WAKE_LOCK, ACCESS_WIFI_STATE.
 
-Fase 7 (7b: com zoom a página acompanha cada palavra na horizontal e espera 2,5 s depois de um gesto): grifo + página acompanha + progresso. WordSyncEngine liga o PdfEngine ao áudio no ReaderViewModel (1 sync por trecho, na IO);
+Fase 7 (7c: a tela volta à página falada 3 s depois de o usuário folhear; 7b: com zoom a página acompanha cada palavra na horizontal e espera 2,5 s depois de um gesto): grifo + página acompanha + progresso. WordSyncEngine liga o PdfEngine ao áudio no ReaderViewModel (1 sync por trecho, na IO);
 HighlightBuilder escolhe palavra + linhas do trecho; PageCanvas desenha (Multiply) com a mesma escala/deslocamento; PageViewState.ensureVisible rola
 quando a linha do grifo sai da área visível (RevealPolicy). O NarrationEngine salva (página, indexInPage) a cada trecho, mesmo com a tela fechada;
 "Ouvir" retoma do trecho salvo se a página aberta é a da posição salva.
+
+Fase 8.1 (banco do download offline): data/audio/ — AudioDatabase (audio.db, SEPARADO do lector.db: sem migração, biblioteca intocada),
+AudioChunkEntity (chave: livro+voz+versão do planner+índice do trecho; MP3 em arquivo, tempos em TimingsCodec), DownloadJobEntity (por livro+voz),
+AudioDao (próximo a baixar, retomada, falhas/tentativas, andamento, espaço, apagar por voz/livro). BookIndex.chunkRange(páginas) converte páginas em trechos.
+Passo 8.2 do documento original = BookIndex/BookIndexer (6a). Próximo: 8.3 (worker de download).
+
+Fase 8.3 (worker de download): download/ — BookDownloader (lógica pura, testada: 2 em paralelo, escrita atômica .tmp->.mp3, retomada, falha pontual/permanente,
+aborta com falhas seguidas, cancelamento), RoomDownloadStore, EdgeSynthesizer (sempre +0%), BookDownloadWorker (WorkManager + notificação Pausar/Cancelar, checa espaço),
+DownloadManager (start/pause/resume/cancel/retryFailed/deleteVoice/deleteBook; remover o livro apaga o áudio), DownloadActionReceiver. Vozes: Voices (Antonio/Guy/Alvaro; padrão Antonio).
+Botão TEMPORÁRIO "Baixar" na barra da leitura: baixa 10 páginas a partir da atual com a voz Antonio; a linha de baixo mostra x/y. Tela de verdade: 8.5.
+
+Fase 8.4 (tocar do cache): o NarrationEngine, antes de sintetizar um trecho, procura no audio.db (mesma voz + versão do planner) um trecho baixado com arquivo e tempos válidos
+(CachePolicy) e toca dele; senão sintetiza on-line como antes (cache parcial funciona; só a parte baixada toca sem internet). Arquivos baixados nunca são apagados pelo motor
+(só os temporários de tts-live). A linha de baixo mostra "• offline" quando o trecho vem do cache. NarrationState.fromCache.
+
+Fase 8.5 (tela de áudio): ui/downloads/ — AudioSheet (bottom sheet aberto pelo botão "Áudio" da leitura) + DownloadsViewModel: escolha da voz (Antonio/Guy/Alvaro; vale para a narração
+e para os downloads; trocar narrando recomeça o trecho atual), livro inteiro ou páginas X a Y, só Wi-Fi / só carregando, estimativa antes de baixar (trechos, minutos, MB),
+progresso com Pausar/Retomar/Cancelar, "Tentar de novo só os que falharam", espaço por voz e "Apagar áudio desta voz". Biblioteca: selo "Disponível offline".
+LectorPrefs (DataStore): voz, velocidade (agora persiste), Wi-Fi/carregando. Barra de cima da leitura: [←] título [Áudio] [⋮] (ajuste, zoom e restaurar foram para o menu ⋮;
+corrige o botão voltar coberto). Removidos os botões temporários "Texto" e "Baixar" (o diagnóstico de texto agora fica no fim da tela de áudio).

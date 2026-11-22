@@ -73,6 +73,7 @@ class BookRepository(
     suspend fun remove(book: BookEntity) = withContext(Dispatchers.IO) {
         dao.deleteById(book.id)
         runCatching { BookIndexStore(File(context.filesDir, "index")).delete(book.id) }
+        runCatching { com.lector.app.download.DownloadManager(context).deleteBook(book.id) }
         releaseQuietly(Uri.parse(book.uri)) // libera a cota de permissões persistentes
     }
 

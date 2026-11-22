@@ -1,6 +1,7 @@
 package com.lector.app.ui.reader
 
 import android.app.Application
+import android.os.SystemClock
 import android.graphics.Bitmap
 import android.net.Uri
 import androidx.compose.ui.graphics.ImageBitmap
@@ -11,6 +12,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.lector.app.data.BookRepository
 import com.lector.app.data.LectorDatabase
+import com.lector.app.data.LectorPrefs
 import com.lector.app.data.BookIndexStore
 import com.lector.app.domain.BookIndex
 import com.lector.app.domain.BookIndexer
@@ -37,8 +39,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -73,6 +78,7 @@ private data class RenderKey(val page: Int, val scaleKey: Int)
 
 class ReaderViewModel(app: Application, private val bookId: String) : AndroidViewModel(app) {
     private val repo = BookRepository(app, LectorDatabase.get(app).bookDao())
+    private val prefs = LectorPrefs(app)
 
     private val _state = MutableStateFlow<ReaderUiState>(ReaderUiState.Loading)
     val state: StateFlow<ReaderUiState> = _state.asStateFlow()
@@ -118,6 +124,10 @@ class ReaderViewModel(app: Application, private val bookId: String) : AndroidVie
         showPage(PageNavigator.clamp(book.lastPage, total), save = false)
         startIndexing()
         startNarrationWatcher()
+        viewModelScope.launch { // velocidade guardada (só se não há narração em andamento)
+            val saved = prefs.speed.first()
+            if (narrationEngine.state.value.status == NarrationStatus.IDLE) narrationEngine.setSpeed(saved)
+        }
     }
 
     // --- Fase 6a: índice de narração do livro inteiro (feito uma vez e guardado em arquivo). ---
@@ -160,7 +170,14 @@ class ReaderViewModel(app: Application, private val bookId: String) : AndroidVie
     private fun readyOrNoText(index: BookIndex, fromCache: Boolean, ms: Long): IndexState =
         if (index.isEmpty) IndexState.NoText else IndexState.Ready(index, fromCache, ms)
 
-    fun goTo(page: Int) = showPage(PageNavigator.clamp(page, total), save = true)
+    /** Última navegação feita pelo usuário (botões, deslize, "ir para"): a narração espera um pouco antes de puxar a tela de volta. */
+    private var lastManualNavMs = 0L
+    private var lastFollowMs = 0L
+
+    fun goTo(page: Int) {
+        lastManualNavMs = SystemClock.uptimeMillis()
+        showPage(PageNavigator.clamp(page, total), save = true)
+    }
 
     fun next() = currentPage()?.let { goTo(PageNavigator.next(it, total)) }
     fun prev() = currentPage()?.let { goTo(PageNavigator.prev(it, total)) }
@@ -271,7 +288,7 @@ class ReaderViewModel(app: Application, private val bookId: String) : AndroidVie
             val saved = repo.getBook(bookId)
             val resume = saved?.takeIf { it.lastPage == page }?.let { index.find(page, it.lastChunkIndex) }
             val chunk = resume ?: index.firstFrom(page) ?: return@launch
-            e.play(bookId, title, index, chunk)
+            e.play(bookId, title, index, chunk, prefs.voice.first())
         }
     }
 
@@ -328,10 +345,20 @@ class ReaderViewModel(app: Application, private val bookId: String) : AndroidVie
         }
         val h = HighlightBuilder.build(chunk.pageIndex, syncedWords, s.wordIndex)
         _highlight.value = h
-        // A página acompanha a narração só quando a fala passa para outra página (quem folheia sozinho não é puxado de volta a cada palavra).
-        if (h.page != lastNarratedPage && currentPage() != null) {
-            lastNarratedPage = h.page
-            if (currentPage() != h.page) showPage(h.page, save = false) // o progresso é salvo pelo motor
+        // A página acompanha a narração: quando a fala passa para outra página e também quando o usuário se afastou
+        // da página falada e já passou FOLLOW_RESUME_MS desde a última navegação dele (a tela volta sozinha).
+        val shown = currentPage()
+        if (shown != null) {
+            val now = SystemClock.uptimeMillis()
+            val narratedPageChanged = h.page != lastNarratedPage
+            val userAway = shown != h.page && now - lastManualNavMs >= FOLLOW_RESUME_MS
+            if ((narratedPageChanged || userAway) && now - lastFollowMs > 800) {
+                lastNarratedPage = h.page
+                if (shown != h.page) {
+                    lastFollowMs = now
+                    showPage(h.page, save = false) // o progresso é salvo pelo motor
+                }
+            }
         }
     }
 
@@ -342,7 +369,10 @@ class ReaderViewModel(app: Application, private val bookId: String) : AndroidVie
 
     fun narrationNext() { if (mine()) narrationEngine.next() }
     fun narrationPrevious() { if (mine()) narrationEngine.previous() }
-    fun setNarrationSpeed(speed: Float) = narrationEngine.setSpeed(speed)
+    fun setNarrationSpeed(speed: Float) {
+        narrationEngine.setSpeed(speed)
+        viewModelScope.launch { prefs.setSpeed(speed) }
+    }
 
     fun dismissProbe() {
         probeJob?.cancel()
@@ -369,5 +399,8 @@ class ReaderViewModel(app: Application, private val bookId: String) : AndroidVie
 
     private companion object {
         const val CACHE_MAX_PIXELS = 16_000_000L
+
+        /** Depois de o usuário trocar de página, a narração espera isto antes de trazer a tela de volta à página falada. */
+        const val FOLLOW_RESUME_MS = 3000L
     }
 }

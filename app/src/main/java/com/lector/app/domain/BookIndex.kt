@@ -22,6 +22,17 @@ data class BookIndex(val plannerVersion: Int, val pageCount: Int, val chunks: Li
     /** Onde retomar a leitura: o trecho salvo; se não existir mais, o primeiro a partir da página. */
     fun resumePoint(page: Int, indexInPage: Int): Chunk? = find(page, indexInPage) ?: firstFrom(page)
 
+    /**
+     * Intervalo de [Chunk.index] dos trechos que COMEÇAM nas páginas [fromPage]..[toPage] (base 0, inclusive);
+     * null se nenhum começa ali. Os trechos estão em ordem de página, então o intervalo é contínuo.
+     */
+    fun chunkRange(fromPage: Int, toPage: Int): IntRange? {
+        val inRange = fromPage..toPage
+        val first = chunks.firstOrNull { it.pageIndex in inRange } ?: return null
+        val last = chunks.last { it.pageIndex in inRange }
+        return first.index..last.index
+    }
+
     fun next(chunk: Chunk): Chunk? = chunks.getOrNull(chunk.index + 1)
 
     fun previous(chunk: Chunk): Chunk? = chunks.getOrNull(chunk.index - 1)

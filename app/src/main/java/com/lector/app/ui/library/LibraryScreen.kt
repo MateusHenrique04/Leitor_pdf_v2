@@ -48,6 +48,7 @@ import com.lector.app.domain.ReadingProgress
 @Composable
 fun LibraryScreen(onOpenBook: (BookEntity) -> Unit, viewModel: LibraryViewModel = viewModel()) {
     val books by viewModel.books.collectAsStateWithLifecycle()
+    val offlineBooks by viewModel.offlineBooks.collectAsStateWithLifecycle()
     val isAdding by viewModel.isAdding.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var bookToDelete by remember { mutableStateOf<BookEntity?>(null) }
@@ -86,6 +87,7 @@ fun LibraryScreen(onOpenBook: (BookEntity) -> Unit, viewModel: LibraryViewModel 
                     items(books, key = { it.id }) { book ->
                         BookCard(
                             book = book,
+                            offline = book.id in offlineBooks,
                             onClick = { onOpenBook(book) },
                             onDelete = { bookToDelete = book },
                         )
@@ -112,7 +114,7 @@ fun LibraryScreen(onOpenBook: (BookEntity) -> Unit, viewModel: LibraryViewModel 
 }
 
 @Composable
-private fun BookCard(book: BookEntity, onClick: () -> Unit, onDelete: () -> Unit) {
+private fun BookCard(book: BookEntity, offline: Boolean, onClick: () -> Unit, onDelete: () -> Unit) {
     Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
         Row(
             Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
@@ -129,6 +131,13 @@ private fun BookCard(book: BookEntity, onClick: () -> Unit, onDelete: () -> Unit
                     ReadingProgress.label(book.lastPage, book.totalPages, book.finished),
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                if (offline) {
+                    Text(
+                        "Disponível offline",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
             IconButton(onClick = onDelete) {
                 Icon(Icons.Default.Delete, contentDescription = "Remover da biblioteca")

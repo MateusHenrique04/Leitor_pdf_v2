@@ -16,7 +16,11 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import com.lector.app.data.BookRepository
 import com.lector.app.data.LectorDatabase
+import com.lector.app.data.audio.AudioDatabase
+import com.lector.app.data.audio.ChunkStatus
 import com.lector.app.domain.BookIndex
+import com.lector.app.domain.CachePolicy
+import com.lector.app.domain.CachedAudio
 import com.lector.app.domain.Chunk
 import com.lector.app.domain.NarrationState
 import com.lector.app.domain.NarrationStatus
@@ -54,7 +58,7 @@ import java.io.File
 class NarrationEngine private constructor(private val appContext: Context) {
 
     companion object {
-        const val DEFAULT_VOICE = "pt-BR-FranciscaNeural"
+        const val DEFAULT_VOICE = com.lector.app.domain.Voices.DEFAULT_ID
         /** Quantos trechos sintetizar à frente do que está tocando. */
         const val AHEAD = 2
         /** Quantos trechos já tocados manter na playlist (para "Anterior" sem sintetizar de novo). */
@@ -86,6 +90,7 @@ class NarrationEngine private constructor(private val appContext: Context) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val tts = EdgeTtsClient()
+    private val audioDao by lazy { AudioDatabase.get(appContext).audioDao() }
     private val repo by lazy { BookRepository(appContext, LectorDatabase.get(appContext).bookDao()) }
     private val dir = File(appContext.cacheDir, "tts-live").also { it.deleteRecursively(); it.mkdirs() }
 
@@ -113,7 +118,9 @@ class NarrationEngine private constructor(private val appContext: Context) {
     private var pipeline: Job? = null
     private var ticker: Job? = null
     private val currentChunk = MutableStateFlow(0)
-    private val files = HashMap<Int, File>()
+    /** MP3 temporários da sessão (tts-live), apagados ao passar. Os do cache baixado NUNCA entram aqui. */
+    private val liveFiles = HashMap<Int, File>()
+    private val fromCacheByChunk = HashMap<Int, Boolean>()
     private val timingsByChunk = HashMap<Int, List<WordTiming>>()
     private var pipelineDone = false
     private var pipelineError: String? = null
@@ -185,6 +192,16 @@ class NarrationEngine private constructor(private val appContext: Context) {
         }
     }
 
+    /** Troca a voz da narração em andamento: recomeça do trecho atual com a voz nova (respeitando a pausa). */
+    fun setVoice(voice: String) {
+        val s = session ?: return
+        if (s.voice == voice) return
+        val chunk = _state.value.chunk ?: return
+        val wasPlaying = player.playWhenReady
+        begin(s.bookId, s.title, s.index, chunk.index, voice)
+        if (!wasPlaying) player.playWhenReady = false
+    }
+
     fun setSpeed(speed: Float) {
         player.setPlaybackParameters(PlaybackParameters(speed))
         _state.update { it.copy(speed = speed) }
@@ -250,7 +267,8 @@ class NarrationEngine private constructor(private val appContext: Context) {
         ticker?.cancel()
         player.stop()
         player.clearMediaItems()
-        files.clear()
+        liveFiles.clear()
+        fromCacheByChunk.clear()
         timingsByChunk.clear()
         dir.listFiles()?.forEach { it.delete() }
         pipelineDone = false
@@ -284,15 +302,22 @@ class NarrationEngine private constructor(private val appContext: Context) {
         while (next < chunks.size) {
             currentChunk.first { next - it <= AHEAD } // não sintetiza longe demais do que está tocando
             val chunk = chunks[next]
-            val result = synthesize(chunk.text, s.voice)
-            if (result == null) { // falhou depois de todas as tentativas
-                refreshStatus()
-                return
+            // Fase 8.4: se o trecho já foi baixado (mesma voz e versão do planner), toca do arquivo, sem internet.
+            val cached = withContext(Dispatchers.IO) { lookupCache(s, chunk.index) }
+            val audio = if (cached != null) {
+                ChunkAudio(File(cached.path), cached.timings, cached.endMs, temporary = false)
+            } else {
+                val result = synthesize(chunk.text, s.voice)
+                if (result == null) { // falhou depois de todas as tentativas
+                    refreshStatus()
+                    return
+                }
+                val file = withContext(Dispatchers.IO) {
+                    File(dir, "g${s.generation}-c${chunk.index}.mp3").also { it.writeBytes(result.audioBytes) }
+                }
+                ChunkAudio(file, result.timings, result.speechEndMs, temporary = true)
             }
-            val file = withContext(Dispatchers.IO) {
-                File(dir, "g${s.generation}-c${chunk.index}.mp3").also { it.writeBytes(result.audioBytes) }
-            }
-            enqueue(chunk, file, result)
+            enqueue(chunk, audio)
             next++
         }
         pipelineDone = true
@@ -318,11 +343,21 @@ class NarrationEngine private constructor(private val appContext: Context) {
         return null
     }
 
-    private fun enqueue(chunk: Chunk, file: File, result: TTSResult) {
-        files[chunk.index] = file
-        timingsByChunk[chunk.index] = result.timings // antes do addMediaItem: o listener já vai precisar deles
+    private class ChunkAudio(val file: File, val timings: List<WordTiming>, val endMs: Long?, val temporary: Boolean)
+
+    /** Trecho baixado e utilizável (ver [CachePolicy]); null se não há, ou se o arquivo sumiu. */
+    private suspend fun lookupCache(s: Session, chunkIndex: Int): CachedAudio? = runCatching {
+        val row = audioDao.getChunk(s.bookId, s.voice, s.index.plannerVersion, chunkIndex)
+        CachePolicy.resolve(row?.status == ChunkStatus.DONE, row?.filePath, row?.durationMs, row?.timings) { File(it).isFile }
+    }.getOrNull()
+
+    private fun enqueue(chunk: Chunk, audio: ChunkAudio) {
+        val file = audio.file
+        if (audio.temporary) liveFiles[chunk.index] = file
+        fromCacheByChunk[chunk.index] = !audio.temporary
+        timingsByChunk[chunk.index] = audio.timings // antes do addMediaItem: o listener já vai precisar deles
         val clip = MediaItem.ClippingConfiguration.Builder()
-        result.speechEndMs?.let { clip.setEndPositionMs(it) }
+        audio.endMs?.let { clip.setEndPositionMs(it) }
         val item = MediaItem.Builder()
             .setMediaId(chunk.index.toString())
             .setUri(Uri.fromFile(file))
@@ -351,7 +386,12 @@ class NarrationEngine private constructor(private val appContext: Context) {
         val chunk = s.index.chunks.getOrNull(chunkIndex) ?: return
         currentChunk.value = chunkIndex
         _state.update {
-            it.copy(chunk = chunk, timings = timingsByChunk[chunkIndex].orEmpty(), wordIndex = -1)
+            it.copy(
+                chunk = chunk,
+                timings = timingsByChunk[chunkIndex].orEmpty(),
+                wordIndex = -1,
+                fromCache = fromCacheByChunk[chunkIndex] == true,
+            )
         }
         prune(chunkIndex)
         saveProgress(s.bookId, chunk)
@@ -363,7 +403,8 @@ class NarrationEngine private constructor(private val appContext: Context) {
             val first = player.getMediaItemAt(0).mediaId.toIntOrNull() ?: break
             if (first >= current - KEEP_BEHIND) break
             player.removeMediaItem(0)
-            files.remove(first)?.delete()
+            liveFiles.remove(first)?.delete() // só os temporários; o áudio baixado fica
+            fromCacheByChunk.remove(first)
             timingsByChunk.remove(first)
         }
     }

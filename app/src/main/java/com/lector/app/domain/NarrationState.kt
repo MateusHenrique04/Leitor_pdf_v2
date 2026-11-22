@@ -13,5 +13,7 @@ data class NarrationState(
     val timings: List<WordTiming> = emptyList(),
     val wordIndex: Int = -1,
     val speed: Float = 1f,
+    /** O trecho atual toca de um arquivo baixado (sem internet) em vez de ter sido sintetizado agora. */
+    val fromCache: Boolean = false,
     val error: String? = null,
 )

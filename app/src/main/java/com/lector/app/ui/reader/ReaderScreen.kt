@@ -22,9 +22,12 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -55,6 +58,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.lector.app.ui.downloads.AudioSheet
 import com.lector.app.domain.FitMode
 import com.lector.app.domain.NarrationState
 import com.lector.app.domain.NarrationStatus
@@ -103,6 +107,8 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
         if (h.page == shown) pageState.ensureVisible(w)
     }
     var showJump by remember { mutableStateOf(false) }
+    var showAudio by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
     val ready = uiState as? ReaderUiState.Ready
 
     // Página nova: reposiciona (topo, centralizada).
@@ -135,17 +141,27 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                 },
                 actions = {
                     if (ready != null) {
-                        TextButton(onClick = vm::runTextProbe) { Text("Texto") } // temporário (Fase 3b)
-                        TextButton(onClick = {
-                            pageState.changeFitMode(
-                                if (pageState.fitMode == FitMode.WIDTH) FitMode.PAGE else FitMode.WIDTH
-                            )
-                        }) { Text(if (pageState.fitMode == FitMode.WIDTH) "Largura" else "Página") }
-                        TextButton(onClick = { pageState.zoomStep(-1) }) { Text("−") }
-                        TextButton(onClick = { pageState.resetView() }) {
-                            Text("${(pageState.zoom * 100).roundToInt()}%")
+                        TextButton(onClick = { showAudio = true }) { Text("Áudio") }
+                        Box {
+                            IconButton(onClick = { menuOpen = true }) {
+                                Icon(Icons.Default.MoreVert, contentDescription = "Mais opções")
+                            }
+                            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text(if (pageState.fitMode == FitMode.WIDTH) "Ajustar à página inteira" else "Ajustar à largura") },
+                                    onClick = {
+                                        menuOpen = false
+                                        pageState.changeFitMode(if (pageState.fitMode == FitMode.WIDTH) FitMode.PAGE else FitMode.WIDTH)
+                                    },
+                                )
+                                DropdownMenuItem(text = { Text("Diminuir zoom") }, onClick = { menuOpen = false; pageState.zoomStep(-1) })
+                                DropdownMenuItem(
+                                    text = { Text("Zoom ${(pageState.zoom * 100).roundToInt()}% (restaurar)") },
+                                    onClick = { menuOpen = false; pageState.resetView() },
+                                )
+                                DropdownMenuItem(text = { Text("Aumentar zoom") }, onClick = { menuOpen = false; pageState.zoomStep(+1) })
+                            }
                         }
-                        TextButton(onClick = { pageState.zoomStep(+1) }) { Text("+") }
                     }
                 },
             )
@@ -198,6 +214,9 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
         }
     }
 
+    if (showAudio) {
+        AudioSheet(bookId = bookId, onDismiss = { showAudio = false }, onTextDiagnostic = vm::runTextProbe)
+    }
     if (showJump && ready != null) {
         JumpToPageDialog(
             total = ready.totalPages,
@@ -264,7 +283,7 @@ private fun indexInfo(state: IndexState, page: Int, narration: NarrationState, m
         val word = narration.timings.getOrNull(narration.wordIndex)?.word.orEmpty()
         val status = when (narration.status) {
             NarrationStatus.LOADING -> "sintetizando…"
-            NarrationStatus.PLAYING -> "falando: $word"
+            NarrationStatus.PLAYING -> "falando: $word" + if (narration.fromCache) "  •  offline" else ""
             NarrationStatus.PAUSED -> "pausado"
             NarrationStatus.ENDED -> "fim do livro"
             NarrationStatus.ERROR -> "erro: ${narration.error.orEmpty()}"
