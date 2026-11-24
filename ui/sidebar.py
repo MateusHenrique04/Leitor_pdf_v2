@@ -97,7 +97,7 @@ class Sidebar(QWidget):
         bar.setFixedSize(3, 34)
         text = QVBoxLayout()
         text.setSpacing(0)
-        name = QLabel("LECTOR")
+        name = QLabel("LER COMIGO")
         name.setObjectName("logo")
         tag = QLabel("pdf audiobook")
         tag.setObjectName("tagline")

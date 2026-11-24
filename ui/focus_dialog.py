@@ -159,8 +159,8 @@ class FocusMixin:
         self.right_panel.set_focus_active(False)
         self.right_panel.set_focus_text("✓ Foco concluído!")
         QTimer.singleShot(5000, lambda: self.right_panel.set_focus_text(""))
-        self.setWindowTitle("LECTOR  ✓ Foco concluído!")
-        QTimer.singleShot(4000, lambda: self.setWindowTitle("LECTOR"))
+        self.setWindowTitle("LER COMIGO  ✓ Foco concluído!")
+        QTimer.singleShot(4000, lambda: self.setWindowTitle("LER COMIGO"))
 
     def _focus_cancel(self):
         self._focus_active = False

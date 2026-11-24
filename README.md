@@ -1,4 +1,4 @@
-# Lector — leitor de PDF com narração e dicionário interativo
+# Ler Comigo — leitor de PDF com narração e dicionário interativo
 
 Aplicativo desktop (Windows/Linux/Mac, Python + PySide6 (Qt)) para
 ler PDFs em voz alta com destaque sincronizado palavra a palavra, dicionário
@@ -71,12 +71,13 @@ python main.py
 ## Gerar o executável (.exe)
 
 ```bash
-pip install pyinstaller
-pyinstaller main.spec
+python -m pip install pyinstaller
+python -m PyInstaller main.spec
 ```
 
-O executável é gerado em `dist/main.exe`. **Não commite `dist/` nem
-`build/`** — são artefatos de build, já cobertos pelo `.gitignore`.
+O executável com ícone de livro aberto é gerado em `dist/LerComigo.exe`.
+**Não commite `dist/` nem `build/`** — são artefatos de build, já cobertos
+pelo `.gitignore`.
 
 ## Desenvolvimento
 

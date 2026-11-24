@@ -95,7 +95,7 @@ class App(ReadingMixin, HighlightsMixin, SearchMixin, DictPopupMixin,
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("LECTOR")
+        self.setWindowTitle("LER COMIGO")
         self.setMinimumSize(1000, 640)
         self._geo_file = GEOMETRY_FILE
         self._restore_geometry()

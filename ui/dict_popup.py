@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import threading
 
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import QPoint, QRectF, Qt
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from config import C
 from core import dictionary as dic
 from ui.theme import mono_font
 
@@ -27,11 +28,12 @@ class DictPopup(QFrame):
 
     def __init__(self, parent, word: str, result: dict | None):
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
-        self.setObjectName("dictPopup")
+        # Janela transparente (cantos arredondados); o fundo é pintado em
+        # paintEvent, sem depender de QSS (que não pintava o fundo aqui).
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(4, 4, 4, 8)
+        outer.setContentsMargins(4, 8, 4, 8)
         outer.setSpacing(4)
 
         content = QWidget()
@@ -90,6 +92,20 @@ class DictPopup(QFrame):
         content.adjustSize()
         height = min(content.sizeHint().height() + 46, int(screen.height() * 0.7))
         self.setFixedHeight(max(120, height))
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 10, 10)
+        p.fillPath(path, QColor(C["panel_alt2"]))
+        p.save()
+        p.setClipPath(path)
+        p.fillRect(QRectF(rect.left(), rect.top(), rect.width(), 3), QColor(C["red"]))
+        p.restore()
+        p.setPen(QPen(QColor(C["border_soft"]), 1))
+        p.drawPath(path)
 
     @staticmethod
     def _title(text: str) -> QLabel:

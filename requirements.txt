@@ -1,4 +1,4 @@
-# Dependências de runtime do Lector.
+# Dependências de runtime do Ler Comigo.
 # Versões mínimas testadas — PySide6, pymupdf e edge-tts em
 # particular têm mudanças de API entre versões menores, então evite
 # fixar só o nome do pacote sem piso de versão (risco de build

@@ -1,4 +1,4 @@
-"""LECTOR — leitor de PDF com narração e grifo sincronizado (interface Qt)."""
+"""LER COMIGO — leitor de PDF com narração e grifo sincronizado (interface Qt)."""
 import os
 import sys
 
@@ -13,7 +13,7 @@ from ui.theme import app_font, build_qss, dark_palette  # noqa: E402
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("Lector")
+    app.setApplicationName("Ler Comigo")
     app.setStyle("Fusion")            # base consistente entre máquinas; o QSS faz o resto
     app.setPalette(dark_palette())
     app.setFont(app_font())

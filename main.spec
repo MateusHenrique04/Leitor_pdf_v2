@@ -37,7 +37,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='main',
+    name='LerComigo',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -50,4 +50,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='assets/book.ico',
 )
